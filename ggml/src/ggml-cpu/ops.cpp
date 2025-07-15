@@ -10098,6 +10098,137 @@ void ggml_compute_forward_cross_entropy_loss_back(
     }
 }
 
+// ggml_compute_forward_proj_to_logits
+
+static void ggml_compute_forward_proj_to_logits_f32(
+        const ggml_compute_params * params,
+        ggml_tensor * dst) {
+
+    const ggml_tensor * src0 = dst->src[0]; // hidden state [n_seq, n_embd]
+    const ggml_tensor * src1 = dst->src[1]; // lm_head matrix [n_embd, n_vocab]
+
+    GGML_ASSERT(src0->ne[1] == src1->ne[0]); // n_embd must match
+    GGML_ASSERT(dst->ne[0] == src0->ne[0]);  // n_seq
+    GGML_ASSERT(dst->ne[1] == src1->ne[1]);  // n_vocab
+
+    const int ith = params->ith;
+    const int nth = params->nth;
+
+    const int64_t n_seq = src0->ne[0];
+    const int64_t n_embd = src0->ne[1];
+    const int64_t n_vocab = src1->ne[1];
+
+    // Perform matrix multiplication: hidden_state * lm_head = logits
+    // This is equivalent to ggml_mul_mat but specialized for this use case
+    for (int64_t seq_idx = ith; seq_idx < n_seq; seq_idx += nth) {
+        const float * hidden_row = (const float *)((char *)src0->data + seq_idx * src0->nb[0]);
+        float * logits_row = (float *)((char *)dst->data + seq_idx * dst->nb[0]);
+
+        for (int64_t vocab_idx = 0; vocab_idx < n_vocab; vocab_idx++) {
+            float sum = 0.0f;
+            const float * lm_head_col = (const float *)((char *)src1->data + vocab_idx * src1->nb[1]);
+
+            for (int64_t embd_idx = 0; embd_idx < n_embd; embd_idx++) {
+                sum += hidden_row[embd_idx] * lm_head_col[embd_idx];
+            }
+
+            logits_row[vocab_idx] = sum;
+        }
+    }
+}
+
+void ggml_compute_forward_proj_to_logits(
+        const ggml_compute_params * params,
+        ggml_tensor * dst) {
+
+    const ggml_tensor * src0 = dst->src[0];
+
+    switch (src0->type) {
+        case GGML_TYPE_F32:
+            {
+                ggml_compute_forward_proj_to_logits_f32(params, dst);
+            } break;
+        default:
+            {
+                GGML_ABORT("fatal error");
+            }
+    }
+}
+
+// ggml_compute_forward_kl_divergence
+
+static void ggml_compute_forward_kl_divergence_f32(
+        const ggml_compute_params * params,
+        ggml_tensor * dst) {
+
+    const ggml_tensor * src0 = dst->src[0]; // first logits [n_seq, n_vocab]
+    const ggml_tensor * src1 = dst->src[1]; // second logits [n_seq, n_vocab]
+
+    GGML_ASSERT(ggml_are_same_shape(src0, src1));
+    GGML_ASSERT(ggml_is_scalar(dst));
+
+    if (params->ith != 0) {
+        return;
+    }
+
+    const int64_t n_seq = src0->ne[0];
+    const int64_t n_vocab = src0->ne[1];
+
+    float total_kl_div = 0.0f;
+
+    for (int64_t seq_idx = 0; seq_idx < n_seq; seq_idx++) {
+        const float * logits0 = (const float *)((char *)src0->data + seq_idx * src0->nb[0]);
+        const float * logits1 = (const float *)((char *)src1->data + seq_idx * src1->nb[0]);
+
+        // Compute softmax for both distributions
+        float max0 = -INFINITY, max1 = -INFINITY;
+        for (int64_t i = 0; i < n_vocab; i++) {
+            max0 = fmaxf(max0, logits0[i]);
+            max1 = fmaxf(max1, logits1[i]);
+        }
+
+        float sum0 = 0.0f, sum1 = 0.0f;
+        for (int64_t i = 0; i < n_vocab; i++) {
+            sum0 += expf(logits0[i] - max0);
+            sum1 += expf(logits1[i] - max1);
+        }
+
+        // Compute KL divergence: KL(P||Q) = sum(P * log(P/Q))
+        float kl_div = 0.0f;
+        for (int64_t i = 0; i < n_vocab; i++) {
+            float p = expf(logits0[i] - max0) / sum0;
+            float q = expf(logits1[i] - max1) / sum1;
+
+            if (p > 1e-10f && q > 1e-10f) { // Avoid log(0)
+                kl_div += p * logf(p / q);
+            }
+        }
+
+        total_kl_div += kl_div;
+    }
+
+    // Average KL divergence across sequences
+    ((float *)dst->data)[0] = total_kl_div / (float)n_seq;
+}
+
+void ggml_compute_forward_kl_divergence(
+        const ggml_compute_params * params,
+        ggml_tensor * dst) {
+
+    const ggml_tensor * src0 = dst->src[0];
+
+    switch (src0->type) {
+        case GGML_TYPE_F32:
+            {
+                ggml_compute_forward_kl_divergence_f32(params, dst);
+            } break;
+        default:
+            {
+                GGML_ABORT("fatal error");
+            }
+    }
+}
+
 static void ggml_compute_forward_opt_step_adamw_f32(
         const ggml_compute_params * params,
         ggml_tensor * dst) {

@@ -2187,6 +2187,41 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
         }
     ).set_env("LLAMA_ARG_DEFRAG_THOLD"));
     add_opt(common_arg(
+        {"--cipe-exit"},
+        string_format("enable CIPE-Exit layer skipping optimization (default: %s)", params.cipe_exit ? "enabled" : "disabled"),
+        [](common_params & params) {
+            params.cipe_exit = true;
+        }
+    ));
+    add_opt(common_arg(
+        {"--cipe-exit-threshold"}, "N",
+        string_format("KL divergence threshold for CIPE-Exit early exit (legacy, default: %.3f)", (double)params.cipe_exit_threshold),
+        [](common_params & params, const std::string & value) {
+            params.cipe_exit_threshold = std::stof(value);
+        }
+    ));
+    add_opt(common_arg(
+        {"--cipe-exit-start-thr"}, "N",
+        string_format("high divergence threshold for early layers (default: %.3f)", (double)params.cipe_exit_start_thr),
+        [](common_params & params, const std::string & value) {
+            params.cipe_exit_start_thr = std::stof(value);
+        }
+    ));
+    add_opt(common_arg(
+        {"--cipe-exit-end-thr"}, "N",
+        string_format("low divergence threshold for late layers (default: %.3f)", (double)params.cipe_exit_end_thr),
+        [](common_params & params, const std::string & value) {
+            params.cipe_exit_end_thr = std::stof(value);
+        }
+    ));
+    add_opt(common_arg(
+        {"--min-layers"}, "N",
+        string_format("minimum layers to compute before enabling CIPE-Exit early exit (default: %d)", params.min_layers_to_run),
+        [](common_params & params, const std::string & value) {
+            params.min_layers_to_run = std::stoi(value);
+        }
+    ));
+    add_opt(common_arg(
         {"-np", "--parallel"}, "N",
         string_format("number of parallel sequences to decode (default: %d)", params.n_parallel),
         [](common_params & params, int value) {

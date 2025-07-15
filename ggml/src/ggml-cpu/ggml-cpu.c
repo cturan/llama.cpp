@@ -2007,6 +2007,16 @@ static void ggml_compute_forward(struct ggml_compute_params * params, struct ggm
                 ggml_compute_forward_cross_entropy_loss_back(params, tensor);
             }
             break;
+        case GGML_OP_PROJ_TO_LOGITS:
+            {
+                ggml_compute_forward_proj_to_logits(params, tensor);
+            }
+            break;
+        case GGML_OP_KL_DIVERGENCE:
+            {
+                ggml_compute_forward_kl_divergence(params, tensor);
+            }
+            break;
         case GGML_OP_OPT_STEP_ADAMW:
             {
                 ggml_compute_forward_opt_step_adamw(params, tensor);
@@ -2313,6 +2323,8 @@ static int ggml_get_n_tasks(struct ggml_tensor * node, int n_threads) {
         case GGML_OP_CROSS_ENTROPY_LOSS:
         case GGML_OP_CROSS_ENTROPY_LOSS_BACK:
         case GGML_OP_OPT_STEP_ADAMW:
+        case GGML_OP_PROJ_TO_LOGITS:
+        case GGML_OP_KL_DIVERGENCE:
             {
                 n_tasks = n_threads;
             } break;
@@ -2798,6 +2810,16 @@ struct ggml_cplan ggml_graph_plan(
                 case GGML_OP_CROSS_ENTROPY_LOSS:
                     {
                         cur = ggml_type_size(node->type)*(n_tasks + node->src[0]->ne[0]*n_tasks);
+                    } break;
+                case GGML_OP_PROJ_TO_LOGITS:
+                    {
+                        // Memory for matrix multiplication result
+                        cur = ggml_type_size(node->type) * ggml_nelements(node);
+                    } break;
+                case GGML_OP_KL_DIVERGENCE:
+                    {
+                        // Memory for softmax computation and KL divergence calculation
+                        cur = sizeof(float) * (node->src[0]->ne[0] * node->src[0]->ne[1] * 2 + n_tasks);
                     } break;
                 case GGML_OP_COUNT:
                     {

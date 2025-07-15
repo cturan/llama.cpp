@@ -105,6 +105,10 @@ struct llama_context {
     int encode(const llama_batch & batch_inp);
     int decode(const llama_batch & batch_inp);
 
+    // CIPE-Exit helper functions
+    int decode_with_cipe_exit(const llama_batch & batch_inp);
+    bool cipe_exit_should_stop(const float * current_logits, int n_vocab);
+
     //
     // state save/load
     //

@@ -244,6 +244,13 @@ struct common_params {
     int32_t yarn_orig_ctx         =     0; // YaRN original context length
     float   defrag_thold          =  0.1f; // KV cache defragmentation threshold
 
+    // CIPE-Exit parameters for layer skipping optimization
+    bool    cipe_exit             = false; // enable CIPE-Exit layer skipping
+    float   cipe_exit_threshold   = 0.001f; // KL divergence threshold for early exit (legacy)
+    float   cipe_exit_start_thr   = 0.08f;  // high divergence threshold for early layers
+    float   cipe_exit_end_thr     = 0.02f;  // low divergence threshold for late layers
+    int32_t min_layers_to_run     = 10;     // minimum layers to compute before enabling early exit
+
     // offload params
     std::vector<ggml_backend_dev_t> devices; // devices to use for offloading
 

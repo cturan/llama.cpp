@@ -530,6 +530,10 @@ extern "C" {
 
         GGML_OP_GLU,
 
+        // CIPE-Exit operations for layer skipping optimization
+        GGML_OP_PROJ_TO_LOGITS,    // Project hidden state to logits using lm_head
+        GGML_OP_KL_DIVERGENCE,     // Compute KL divergence between two probability distributions
+
         GGML_OP_COUNT,
     };
 
@@ -2247,6 +2251,26 @@ extern "C" {
             struct ggml_tensor  * a,  // logits
             struct ggml_tensor  * b,  // labels
             struct ggml_tensor  * c); // gradients of cross_entropy_loss result
+
+    // CIPE-Exit operations for layer skipping optimization
+
+    // Project hidden state to logits using lm_head matrix
+    // a: hidden state [n_seq, n_embd]
+    // b: lm_head matrix [n_embd, n_vocab]
+    // result: logits [n_seq, n_vocab]
+    GGML_API struct ggml_tensor * ggml_proj_to_logits(
+            struct ggml_context * ctx,
+            struct ggml_tensor  * a,  // hidden state
+            struct ggml_tensor  * b); // lm_head matrix
+
+    // Compute KL divergence between two probability distributions
+    // a: first distribution (logits) [n_seq, n_vocab]
+    // b: second distribution (logits) [n_seq, n_vocab]
+    // result: KL divergence scalar [1]
+    GGML_API struct ggml_tensor * ggml_kl_divergence(
+            struct ggml_context * ctx,
+            struct ggml_tensor  * a,  // first logits
+            struct ggml_tensor  * b); // second logits
 
     // AdamW optimizer step
     // Paper: https://arxiv.org/pdf/1711.05101v3.pdf

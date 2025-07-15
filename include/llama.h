@@ -313,6 +313,13 @@ extern "C" {
         uint32_t yarn_orig_ctx;    // YaRN original context size
         float    defrag_thold;     // defragment the KV cache if holes/size > thold, <= 0 disabled (default)
 
+        // CIPE-Exit parameters for layer skipping optimization
+        bool     cipe_exit;          // enable CIPE-Exit layer skipping (default: false)
+        float    cipe_exit_threshold; // KL divergence threshold for early exit (legacy, default: 0.001)
+        float    cipe_exit_start_thr; // high divergence threshold for early layers (default: 0.08)
+        float    cipe_exit_end_thr;   // low divergence threshold for late layers (default: 0.02)
+        int32_t  min_layers_to_run;  // minimum layers to compute before enabling early exit (default: 10)
+
         ggml_backend_sched_eval_callback cb_eval;
         void * cb_eval_user_data;
 

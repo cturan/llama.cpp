@@ -1008,9 +1008,12 @@ static const char * GGML_OP_NAME[GGML_OP_COUNT] = {
     "OPT_STEP_ADAMW",
 
     "GLU",
+
+    "PROJ_TO_LOGITS",
+    "KL_DIVERGENCE",
 };
 
-static_assert(GGML_OP_COUNT == 86, "GGML_OP_COUNT != 86");
+static_assert(GGML_OP_COUNT == 88, "GGML_OP_COUNT != 88");
 
 static const char * GGML_OP_SYMBOL[GGML_OP_COUNT] = {
     "none",
@@ -1108,9 +1111,12 @@ static const char * GGML_OP_SYMBOL[GGML_OP_COUNT] = {
     "adamw(x)",
 
     "glu(x)",
+
+    "proj_to_logits(x,y)",
+    "kl_divergence(x,y)",
 };
 
-static_assert(GGML_OP_COUNT == 86, "GGML_OP_COUNT != 86");
+static_assert(GGML_OP_COUNT == 88, "GGML_OP_COUNT != 88");
 
 static_assert(GGML_OP_POOL_COUNT == 2, "GGML_OP_POOL_COUNT != 2");
 
@@ -5499,6 +5505,40 @@ struct ggml_tensor * ggml_cross_entropy_loss_back(
     return result;
 }
 
+// ggml_proj_to_logits
+
+struct ggml_tensor * ggml_proj_to_logits(
+        struct ggml_context * ctx,
+        struct ggml_tensor  * a,  // hidden state [n_seq, n_embd]
+        struct ggml_tensor  * b) { // lm_head matrix [n_embd, n_vocab]
+    GGML_ASSERT(a->ne[1] == b->ne[0]); // n_embd must match
+
+    struct ggml_tensor * result = ggml_new_tensor_2d(ctx, a->type, b->ne[1], a->ne[0]); // [n_seq, n_vocab]
+
+    result->op     = GGML_OP_PROJ_TO_LOGITS;
+    result->src[0] = a;
+    result->src[1] = b;
+
+    return result;
+}
+
+// ggml_kl_divergence
+
+struct ggml_tensor * ggml_kl_divergence(
+        struct ggml_context * ctx,
+        struct ggml_tensor  * a,  // first logits [n_seq, n_vocab]
+        struct ggml_tensor  * b) { // second logits [n_seq, n_vocab]
+    GGML_ASSERT(ggml_are_same_shape(a, b));
+
+    struct ggml_tensor * result = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, 1); // scalar result
+
+    result->op     = GGML_OP_KL_DIVERGENCE;
+    result->src[0] = a;
+    result->src[1] = b;
+
+    return result;
+}
+
 // opt_step_adamw
 
 struct ggml_tensor * ggml_opt_step_adamw(
@@ -6111,6 +6151,21 @@ static void ggml_compute_backward(
                 ggml_add_or_set(ctx, cgraph, isrc0, ggml_cross_entropy_loss_back(ctx, grad, src0, src1));
             }
             GGML_ASSERT(!src1_needs_grads && "backward pass for labels not implemented");
+        } break;
+        case GGML_OP_PROJ_TO_LOGITS: {
+            if (src0_needs_grads) {
+                // Gradient w.r.t. hidden state: grad * lm_head^T
+                ggml_add_or_set(ctx, cgraph, isrc0, ggml_mul_mat(ctx, grad, ggml_transpose(ctx, src1)));
+            }
+            if (src1_needs_grads) {
+                // Gradient w.r.t. lm_head: hidden_state^T * grad
+                ggml_add_or_set(ctx, cgraph, isrc1, ggml_mul_mat(ctx, ggml_transpose(ctx, src0), grad));
+            }
+        } break;
+        case GGML_OP_KL_DIVERGENCE: {
+            // KL divergence is typically not differentiated in this context
+            // For CIPE-Exit, we only use it for monitoring, not training
+            GGML_ASSERT(!src0_needs_grads && !src1_needs_grads && "backward pass for KL divergence not implemented");
         } break;
         case GGML_OP_GLU: {
             switch (ggml_get_glu_op(tensor)) {

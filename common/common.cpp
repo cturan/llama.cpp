@@ -1150,6 +1150,11 @@ struct llama_context_params common_context_params_to_llama(const common_params &
     cparams.pooling_type      = params.pooling_type;
     cparams.attention_type    = params.attention_type;
     cparams.defrag_thold      = params.defrag_thold;
+    cparams.cipe_exit         = params.cipe_exit;
+    cparams.cipe_exit_threshold = params.cipe_exit_threshold;
+    cparams.cipe_exit_start_thr = params.cipe_exit_start_thr;
+    cparams.cipe_exit_end_thr   = params.cipe_exit_end_thr;
+    cparams.min_layers_to_run = params.min_layers_to_run;
     cparams.cb_eval           = params.cb_eval;
     cparams.cb_eval_user_data = params.cb_eval_user_data;
     cparams.offload_kqv       = !params.no_kv_offload;
