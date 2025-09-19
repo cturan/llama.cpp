@@ -2300,9 +2300,19 @@ extern "C" {
             struct ggml_tensor  * conv_bias,
             struct ggml_tensor  * beta,
             struct ggml_tensor  * state,
-            int                   chunk_size,
             bool                  use_qk_l2norm,
             float                 scale);
+
+struct ggml_tensor * ggml_delta_net_op(
+        struct ggml_context * ctx,
+        struct ggml_tensor  * q,
+        struct ggml_tensor  * k,
+        struct ggml_tensor  * v,
+        struct ggml_tensor  * g,
+        struct ggml_tensor  * beta,
+        struct ggml_tensor  * state,
+        bool                  use_qk_l2norm,
+        float                 scale);
 
     GGML_API struct ggml_tensor * ggml_rwkv_wkv7(
             struct ggml_context * ctx,

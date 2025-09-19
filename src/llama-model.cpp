@@ -19018,6 +19018,7 @@ struct llm_build_qwen3next : public llm_graph_context_mamba {
         cur = build_lora_mm(model.output, cur);
 
         cb(cur, "result_output", -1);
+        ggml_set_output(cur);
         res->t_logits = cur;
 
         ggml_build_forward_expand(gf, cur);
@@ -19223,7 +19224,6 @@ private:
                                               conv_bias,       // conv_bias tensor (can be nullptr)
                                               beta,            // beta tensor
                                               state,           // state tensor
-                                              64,              // chunk_size (adjust as needed)
                                               true,            // use_qk_l2norm
                                               1.0f             // scale (adjust based on your model)
         );
