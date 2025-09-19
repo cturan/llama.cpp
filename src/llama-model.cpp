@@ -12,6 +12,7 @@
 #include "llama-memory-recurrent.h"
 
 #include "ggml-cpp.h"
+#include "ggml-delta.h"
 
 #include <algorithm>
 #include <cassert>
