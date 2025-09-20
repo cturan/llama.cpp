@@ -19094,7 +19094,6 @@ private:
                                                     int                  il) {
         // Gated Delta Net implementation using the new ggml_delta_net function
         const auto * mctx_cur = inp->mctx;
-        const auto   kv_head  = mctx_cur->get_head();
 
         const int64_t d_inner  = hparams.ssm_d_inner;
         const int64_t n_heads  = hparams.ssm_dt_rank;
@@ -19198,12 +19197,8 @@ private:
         // Beta tensor
         beta = ggml_reshape_3d(ctx0, beta, n_heads, n_tokens, n_seqs);
 
-        // Get current state slice
-        ggml_tensor * state = ggml_view_4d(ctx0, ssm_states_all, head_dim, head_dim, n_heads, n_seqs,
-                                           ssm_states_all->nb[0], ssm_states_all->nb[1], ssm_states_all->nb[2],
-                                           kv_head * head_dim * head_dim * n_heads * ggml_element_size(ssm_states_all));
-        state               = ggml_cont(ctx0, state);
-
+        ggml_tensor * state = ggml_reshape_4d(ctx0, ssm_states_all, head_dim, head_dim * n_heads, 1, 1);
+        ggml_tensor * state_broadcast = ggml_repeat_4d(ctx0, state, head_dim, head_dim * n_heads, n_seqs, n_tokens);
         ggml_tensor * target_gate    = ggml_new_tensor_4d(ctx0, GGML_TYPE_F32, head_dim, n_heads, n_tokens, n_seqs);
         ggml_tensor * gate_broadcast = ggml_reshape_4d(ctx0, gate, 1, n_heads, n_tokens, n_seqs);
         gate                         = ggml_repeat(ctx0, gate_broadcast, target_gate);
@@ -19217,27 +19212,27 @@ private:
                                               conv_weight,     // conv_weight tensor
                                               conv_bias,       // conv_bias tensor (can be nullptr)
                                               beta,            // beta tensor
-                                              state,           // state tensor
+                                              state_broadcast, // state tensor
                                               true,            // use_qk_l2norm
                                               1.0f             // scale (adjust based on your model)
         );
         cb(output, "delta_net_output", il);
 
-        // Extract the output part (first half of the concatenated result)
+        // Extract the output part
         ggml_tensor * attn_out = ggml_view_4d(ctx0, output, head_dim, n_heads, n_tokens, n_seqs, output->nb[0],
                                               output->nb[1], output->nb[2], 0);
 
-        // Extract the new state (second half of the concatenated result)
-        ggml_tensor * new_state =
-            ggml_view_4d(ctx0, output, head_dim, head_dim, n_heads, n_seqs, output->nb[0], output->nb[1], output->nb[2],
-                         n_tokens * head_dim * n_heads * sizeof(float));
+        // Extract the new state
+        ggml_tensor * new_state = ggml_view_4d(ctx0, output, head_dim, head_dim * n_heads, n_tokens, n_seqs, 
+            output->nb[0], output->nb[1], output->nb[2], n_tokens * n_seqs * head_dim * n_heads * ggml_element_size(output));
+
+        // Only return the last recurrent state
+        struct ggml_tensor * state_reshaped = ggml_cont_4d(ctx0, new_state, head_dim, head_dim, n_heads, n_tokens * n_seqs);
+        struct ggml_tensor * state_last = ggml_view_4d(ctx0, state_reshaped, head_dim, head_dim, n_heads, 1, 
+            state_reshaped->nb[1], state_reshaped->nb[2], state_reshaped->nb[3], head_dim * head_dim * n_heads * ((n_seqs * n_tokens) - 1));
 
         // Update the recurrent states
-        ggml_build_forward_expand(
-            gf, ggml_cpy(ctx0, new_state,
-                         ggml_view_1d(
-                             ctx0, ssm_states_all, head_dim * head_dim * n_heads * n_seqs,
-                             kv_head * n_seqs * head_dim * head_dim * n_heads * ggml_element_size(ssm_states_all))));
+        ggml_build_forward_expand(gf, ggml_cpy(ctx0, state_last, ssm_states_all));
 
         // Reshape both attn_out and z to 2D tensors for normalization
         // attn_out: [head_dim, n_heads, n_tokens, n_seqs] -> [n_heads * n_tokens * n_seqs, head_dim]
