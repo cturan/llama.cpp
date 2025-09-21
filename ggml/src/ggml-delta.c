@@ -17,8 +17,6 @@ struct ggml_tensor * ggml_delta_net(
         struct ggml_tensor  * v,
         struct ggml_tensor  * q,
         struct ggml_tensor  * g,
-        struct ggml_tensor  * conv_weight,
-        struct ggml_tensor  * conv_bias,
         struct ggml_tensor  * beta,
         struct ggml_tensor  * state,
         bool                  use_qk_l2norm,
@@ -55,67 +53,23 @@ struct ggml_tensor * ggml_delta_net(
        
     GGML_ASSERT(g->ne[0] == S_v && g->ne[1] == H_v && g->ne[2] == n_tokens && g->ne[3] == n_seqs);
        
-    // Merge q, k, v into qkv
-    struct ggml_tensor * mixed_qkv = ggml_concat(ctx, q, k, 1);
-    report_tensor_size("mixed_qkv_qk", mixed_qkv);
-    mixed_qkv = ggml_concat(ctx, mixed_qkv, v, 1);
-    report_tensor_size("mixed_qkv_qkv", mixed_qkv);
-
-    uint32_t dim = (S_v * H_v) + 2 * (H_k * S_k);
-
-    mixed_qkv = ggml_reshape_3d(ctx, mixed_qkv, n_seqs, dim, n_tokens);
-    report_tensor_size("mixed_qkv_reshaped", mixed_qkv);
-    struct ggml_tensor * mixed_qkv_padded = ggml_pad(ctx, mixed_qkv, conv_weight->ne[0] - 1, 0, 0, 0);
-    report_tensor_size("mixed_qkv_padded", mixed_qkv_padded);
-
-    // Apply convolution
-    struct ggml_tensor * conv_out = ggml_ssm_conv(ctx, mixed_qkv_padded, conv_weight);
-    report_tensor_size("conv_out", conv_out);
-
-    if (conv_bias) {
-        conv_out = ggml_add(ctx, conv_out, conv_bias);
-        report_tensor_size("conv_out_bias", conv_out);
-    }
-
-    conv_out = ggml_silu(ctx, conv_out);
-    report_tensor_size("conv_out_silu", conv_out);
-
-    conv_out = ggml_reshape_4d(ctx, conv_out, dim, n_seqs, n_tokens, 1);
-    report_tensor_size("conv_out_reshaped", conv_out);
-
-    conv_out = ggml_permute(ctx, conv_out, 0, 2, 1, 3);
-    report_tensor_size("conv_out_transposed", conv_out);
-
     // Beta sigmoid
     struct ggml_tensor * beta_sigmoid = ggml_sigmoid(ctx, beta);
     report_tensor_size("beta_sigmoid", beta_sigmoid);
 
     // Gate calculations are done elsewhere in llama-model.cpp
 
-    // Re-split the qkv tensors
-    struct ggml_tensor * q_conv = ggml_view_4d(ctx, conv_out, S_k, H_k, conv_out->ne[1], conv_out->ne[2], 
-                                               H_k * sizeof(float), conv_out->nb[1], conv_out->nb[2], 0);
-    report_tensor_size("q_conv_view", q_conv);
-
-    struct ggml_tensor * k_conv = ggml_view_4d(ctx, conv_out, S_k, H_k, conv_out->ne[1], conv_out->ne[2],
-                                               H_k * sizeof(float), conv_out->nb[1], conv_out->nb[2], S_k * H_k * sizeof(q->type));
-    report_tensor_size("k_conv_view", k_conv);
-
-    struct ggml_tensor * v_conv = ggml_view_4d(ctx, conv_out, S_v, H_v, conv_out->ne[1], conv_out->ne[2], H_v * sizeof(float),
-                                               conv_out->nb[1], conv_out->nb[2], (2 * S_k * H_k) * sizeof(q->type));
-    report_tensor_size("v_conv_view", v_conv);
-
-    struct ggml_tensor * q_broadcast = q_conv;
-    struct ggml_tensor * k_broadcast = k_conv;
+    struct ggml_tensor * q_broadcast = q;
+    struct ggml_tensor * k_broadcast = k;
     
     // if head keys and value keys are different, repeat to force tensors into matching shapes
     if (H_k != H_v) {
         GGML_ASSERT(H_v % H_k == 0);
         int64_t repeat_factor = H_v / H_k;
         
-        q_broadcast = ggml_cont_4d(ctx, q_conv, S_k, n_tokens, H_k, n_seqs);
+        q_broadcast = ggml_cont_4d(ctx, q, S_k, n_tokens, H_k, n_seqs);
         report_tensor_size("q_broadcast_reshape1", q_broadcast);
-        k_broadcast = ggml_cont_4d(ctx, k_conv, S_k, n_tokens, H_k, n_seqs);
+        k_broadcast = ggml_cont_4d(ctx, k, S_k, n_tokens, H_k, n_seqs);
         report_tensor_size("k_broadcast_reshape1", k_broadcast);
         
         q_broadcast = ggml_repeat_4d(ctx, q_broadcast, S_k, n_tokens * repeat_factor, H_k, n_seqs);
@@ -129,7 +83,7 @@ struct ggml_tensor * ggml_delta_net(
         report_tensor_size("k_broadcast_reshape2", k_broadcast);
     }
 
-    struct ggml_tensor * v_reshape = ggml_cont_4d(ctx, v_conv, S_v, H_v, n_seqs, n_tokens);
+    struct ggml_tensor * v_reshape = ggml_cont_4d(ctx, v, S_v, H_v, n_seqs, n_tokens);
     report_tensor_size("v_reshape", v_reshape);
     struct ggml_tensor * g_reshape = ggml_cont_4d(ctx, g, S_v, H_v, n_seqs, n_tokens);
     report_tensor_size("g_reshape", g_reshape);
@@ -211,7 +165,7 @@ struct ggml_tensor * ggml_delta_net_op(
     struct ggml_tensor * kv_mem_presum_squeeze = ggml_reshape_4d(ctx, kv_mem_presum, S_v, S_v, H_v, n_seq * n_tokens);
     report_tensor_size("kv_mem_presum_sequeeze", kv_mem_presum_squeeze);
 
-    struct ggml_tensor * kv_mem = ggml_permute(ctx, ggml_sum_rows(ctx, ggml_permute(ctx, kv_mem_presum_squeeze, 1, 2, 0, 3)), 2, 0, 1, 3);
+    struct ggml_tensor * kv_mem = ggml_permute(ctx, ggml_sum_rows(ctx, ggml_cont(ctx, ggml_permute(ctx, kv_mem_presum_squeeze, 1, 2, 0, 3))), 2, 0, 1, 3);
     report_tensor_size("kv_mem", kv_mem);
 
     struct ggml_tensor * kv_mem_reshape = ggml_reshape_4d(ctx, kv_mem, S_v, S_v, n_seq, n_tokens);
