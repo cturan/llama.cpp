@@ -18958,6 +18958,7 @@ struct llm_build_qwen3next : public llm_graph_context_mamba {
         ggml_tensor * inpL;
 
         inpL = build_inp_embd(model.tok_embd);
+        cb(inpL, "model.embed_tokens", -1);
 
         auto * inp = build_inp_mem_hybrid();
 
@@ -19259,21 +19260,25 @@ struct llm_build_qwen3next : public llm_graph_context_mamba {
         ggml_tensor * query = ggml_cont(ctx0, ggml_view_4d(ctx0, mixed_qkvz_reshaped, split_sizes_qkvz[0], num_k_heads,
                                                            n_tokens, n_seqs, split_sizes_qkvz[0] * sizeof(float),
                                                            mixed_qkvz_reshaped->nb[1], mixed_qkvz_reshaped->nb[2], 0));
+        cb(query, "q", il);
 
         ggml_tensor * key =
             ggml_cont(ctx0, ggml_view_4d(ctx0, mixed_qkvz_reshaped, split_sizes_qkvz[1], num_k_heads, n_tokens, n_seqs,
                                          split_sizes_qkvz[1] * sizeof(float), mixed_qkvz_reshaped->nb[1],
                                          mixed_qkvz_reshaped->nb[2], split_sizes_qkvz[0] * sizeof(float)));
+        cb(query, "k", il);
 
         ggml_tensor * value =
             ggml_view_4d(ctx0, mixed_qkvz_reshaped, split_sizes_qkvz[2], num_k_heads, n_tokens, n_seqs,
                          split_sizes_qkvz[2] * sizeof(float), mixed_qkvz_reshaped->nb[1], mixed_qkvz_reshaped->nb[2],
                          (split_sizes_qkvz[0] + split_sizes_qkvz[1]) * sizeof(float));
+        cb(query, "v", il);
 
         ggml_tensor * z =
             ggml_view_4d(ctx0, mixed_qkvz_reshaped, split_sizes_qkvz[3], num_k_heads, n_tokens, n_seqs,
                          split_sizes_qkvz[3] * sizeof(float), mixed_qkvz_reshaped->nb[1], mixed_qkvz_reshaped->nb[2],
                          (split_sizes_qkvz[0] + split_sizes_qkvz[1] + split_sizes_qkvz[2]) * sizeof(float));
+        cb(query, "z", il);
 
         // Reshape value and z to merge head dimensions: [batch, seq_len, num_k_heads, head_v_dim*num_v_heads/num_k_heads] -> [batch, seq_len, num_v_heads, head_v_dim]
         ggml_tensor * value_reshaped =
@@ -19293,10 +19298,12 @@ struct llm_build_qwen3next : public llm_graph_context_mamba {
         ggml_tensor * b =
             ggml_view_4d(ctx0, mixed_ba_reshaped, split_sizes_ba[0], num_k_heads, n_tokens, n_seqs,
                          split_sizes_ba[0] * sizeof(float), mixed_ba_reshaped->nb[1], mixed_ba_reshaped->nb[2], 0);
+        cb(query, "b", il);
 
         ggml_tensor * a = ggml_view_4d(ctx0, mixed_ba_reshaped, split_sizes_ba[1], num_k_heads, n_tokens, n_seqs,
                                        split_sizes_ba[1] * sizeof(float), mixed_ba_reshaped->nb[1],
                                        mixed_ba_reshaped->nb[2], split_sizes_ba[0] * sizeof(float));
+        cb(query, "a", il);
 
         // Reshape b and a to merge head dimensions: [batch, seq_len, num_k_heads, num_v_heads/num_k_heads] -> [batch, seq_len, num_v_heads]
         ggml_tensor * beta  = ggml_reshape_3d(ctx0, ggml_cont(ctx0, b), num_v_heads, n_tokens, n_seqs);
@@ -19305,9 +19312,13 @@ struct llm_build_qwen3next : public llm_graph_context_mamba {
         GGML_ASSERT(ggml_nelements(beta) + ggml_nelements(alpha) == ggml_nelements(mixed_ba));
 
         ggml_tensor * alpha_softplus = softplus(alpha, model.layers[il].ssm_dt);
+        cb(alpha_softplus, "a_softplus", il);
         ggml_tensor * A_log_exp      = ggml_exp(ctx0, model.layers[il].ssm_a);     // A_log.exp()
+        cb(A_log_exp, "a_logexp", il);
         ggml_tensor * gate_scaled    = ggml_mul(ctx0, alpha_softplus, A_log_exp);  // A_log.exp() * softplus
+        cb(gate_scaled, "gate_scaled", il);
         ggml_tensor * gate           = ggml_scale(ctx0, gate_scaled, -1.0f);       // - (A_log.exp() * softplus)
+        cb(gate, "gate", il);
 
         // Get convolution states from cache
         ggml_tensor * conv_states_all = mctx_cur->get_r_l(il);
@@ -19315,6 +19326,7 @@ struct llm_build_qwen3next : public llm_graph_context_mamba {
 
         // Build the convolution states tensor
         ggml_tensor * conv_states = build_rs(inp, conv_states_all, hparams.n_embd_r(), n_seqs);
+        cb(conv_states, "conv_states", il);
 
         // Calculate convolution kernel size
         const int64_t conv_kernel_size = model.layers[il].ssm_conv1d->ne[0];
@@ -19396,7 +19408,6 @@ struct llm_build_qwen3next : public llm_graph_context_mamba {
         ggml_tensor * target_gate     = ggml_new_tensor_4d(ctx0, GGML_TYPE_F32, head_dim, n_heads, n_tokens, n_seqs);
         ggml_tensor * gate_broadcast  = ggml_reshape_4d(ctx0, gate, 1, n_heads, n_tokens, n_seqs);
         gate                          = ggml_repeat(ctx0, gate_broadcast, target_gate);
-        cb(gate, "gate", il);
 
         // Call the new ggml_delta_net function with the corrected flow
         ggml_tensor * output = ggml_delta_net(k_conv, v_conv, q_conv, gate, beta, state_broadcast, true, 1.0f, il);
@@ -20190,6 +20201,7 @@ llama_rope_type llama_model_rope_type(const llama_model * model) {
         case LLM_ARCH_ARCEE:
         case LLM_ARCH_ERNIE4_5:
         case LLM_ARCH_ERNIE4_5_MOE:
+        case LLM_ARCH_QWEN3NEXT:
             return LLAMA_ROPE_TYPE_NORM;
 
         // the pairs of head values are offset by n_rot/2
@@ -20209,7 +20221,6 @@ llama_rope_type llama_model_rope_type(const llama_model * model) {
         case LLM_ARCH_QWEN2MOE:
         case LLM_ARCH_QWEN3:
         case LLM_ARCH_QWEN3MOE:
-        case LLM_ARCH_QWEN3NEXT:
         case LLM_ARCH_LLADA_MOE:
         case LLM_ARCH_OLMO2:
         case LLM_ARCH_OLMOE:
