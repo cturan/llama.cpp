@@ -3759,7 +3759,7 @@ class Qwen3NextModel(Qwen3MoeModel):
         self.gguf_writer.add_ssm_state_size(self.find_hparam(["linear_key_head_dim"]))
         self.gguf_writer.add_ssm_group_count(self.find_hparam(["linear_num_key_heads"]))
         self.gguf_writer.add_ssm_time_step_rank(self.find_hparam(["linear_num_value_heads"]))
-        self.gguf_writer.add_ssm_inner_size(self.find_hparam(["hidden_size"]) * (self.find_hparam(["linear_num_value_heads"]) // self.find_hparam(["linear_num_key_heads"])))
+        self.gguf_writer.add_ssm_inner_size(self.find_hparam(['linear_value_head_dim']) * self.find_hparam(['linear_num_value_heads']))
 
     def modify_tensors(self, data_torch: Tensor, name: str, bid: int | None) -> Iterable[tuple[str, Tensor]]:
         if name.startswith("mtp"):
