@@ -19198,12 +19198,15 @@ struct llm_build_qwen3next : public llm_graph_context_mamba {
         // Attention computation
         const float kq_scale =
             hparams.f_attention_scale == 0.0f ? 1.0f / sqrtf(float(n_embd_head)) : hparams.f_attention_scale;
-        cur = build_attn(inp_attn, model.layers[il].wo, nullptr, Qcur, Kcur, Vcur, nullptr, nullptr, nullptr, kq_scale,
+        cur = build_attn(inp_attn, nullptr, nullptr, Qcur, Kcur, Vcur, nullptr, nullptr, nullptr, kq_scale,
                          il);
 
         // Apply gating
         cur = ggml_cont(ctx0, ggml_mul(ctx0, cur, ggml_sigmoid(ctx0, gate)));
         cb(cur, "attn_gated", il);
+
+        cur = build_lora_mm(model.layers[il].wo, cur);
+        cb(cur, "attn_output", il);
 
         return cur;
     }
