@@ -21,9 +21,7 @@ llm_build_qwen3next::llm_build_qwen3next(const llama_model & model, const llm_gr
 
     for (int il = 0; il < n_layer; ++il) {
         struct ggml_tensor * inpSA = inpL;
-
-        // Pre-norm for attention/linear attention
-        cur = build_norm(inpL, model.layers[il].attn_norm, NULL, LLM_NORM_RMS, il);
+        cur = build_q3n_norm(inpL, model.layers[il].attn_norm, il);
         cb(cur, "attn_norm", il);
 
         // Determine layer type and build appropriate attention mechanism
@@ -35,7 +33,7 @@ llm_build_qwen3next::llm_build_qwen3next(const llama_model & model, const llm_gr
             cur = build_qwen3next_attention_layer(cur, inp_pos, inp->get_attn(), model, n_embd_head, il);
         }
         // Post-attention norm
-        cur = build_norm(cur, model.layers[il].attn_post_norm, NULL, LLM_NORM_RMS, il);
+        cur = build_q3n_norm(cur, model.layers[il].attn_post_norm, il);
         cb(cur, "attn_post_norm", il);
 
         if (il == n_layer - 1 && inp_out_ids) {
@@ -48,6 +46,7 @@ llm_build_qwen3next::llm_build_qwen3next(const llama_model & model, const llm_gr
 
         // FFN layer (MoE or dense)
         cur = build_layer_ffn(cur, model, il);
+        cb(cur, "post_moe", il);
 
         // Input for next layer
         inpL = cur;
@@ -55,7 +54,7 @@ llm_build_qwen3next::llm_build_qwen3next(const llama_model & model, const llm_gr
     cur = inpL;
 
     // Final norm
-    cur = build_norm(cur, model.output_norm, NULL, LLM_NORM_RMS, -1);
+    cur = build_q3n_norm(cur, model.output_norm, -1);
 
     cb(cur, "result_norm", -1);
     res->t_embd = cur;
@@ -68,6 +67,11 @@ llm_build_qwen3next::llm_build_qwen3next(const llama_model & model, const llm_gr
     res->t_logits = cur;
 
     ggml_build_forward_expand(gf, cur);
+}
+
+struct ggml_tensor * llm_build_qwen3next::build_q3n_norm(struct ggml_tensor * input, struct ggml_tensor * weights, int layer) {
+    ggml_tensor * input_norm = ggml_scale_bias(ctx0, weights, 1.0f, 1.0f);
+    return build_norm(input, input_norm, nullptr, LLM_NORM_RMS, layer);
 }
 
 // ggml_delta_net
@@ -386,27 +390,38 @@ ggml_tensor * llm_build_qwen3next::build_qwen3next_linear_attn_layer(llm_graph_i
     ggml_tensor * conv_states = build_rs(inp, conv_states_all, hparams.n_embd_r(), n_seqs);
     cb(conv_states, "conv_states", il);
 
-    // Combine query, key, value for convolution input
-    ggml_tensor * qkv_mixed = ggml_concat(ctx0, query, key, 1);
-    qkv_mixed               = ggml_concat(ctx0, qkv_mixed, value_reshaped, 1);
+    // After creating query, key, and value_reshaped, reshape each to flatten the head dimensions
+    // query: [head_k_dim, num_k_heads, n_tokens, n_seqs] -> [head_k_dim * num_k_heads, n_tokens, n_seqs]
+    ggml_tensor * query_flat = ggml_reshape_3d(ctx0, query, head_k_dim * num_k_heads, n_tokens, n_seqs);
+    cb(query_flat, "query_flat", il);
 
+    // key: [head_k_dim, num_k_heads, n_tokens, n_seqs] -> [head_k_dim * num_k_heads, n_tokens, n_seqs]
+    ggml_tensor * key_flat = ggml_reshape_3d(ctx0, key, head_k_dim * num_k_heads, n_tokens, n_seqs);
+    cb(key_flat, "key_flat", il);
+
+    // value_reshaped: [head_v_dim, num_v_heads, n_tokens, n_seqs] -> [head_v_dim * num_v_heads, n_tokens, n_seqs]
+    ggml_tensor * value_flat = ggml_reshape_3d(ctx0, value_reshaped, head_v_dim * num_v_heads, n_tokens, n_seqs);
+    cb(value_flat, "value_flat", il);
+
+    // Now concatenate along the feature dimension (dim 0) to get [conv_dim, n_tokens, n_seqs]
+    ggml_tensor * qkv_mixed = ggml_concat(ctx0, query_flat, key_flat, 0);
+    qkv_mixed               = ggml_concat(ctx0, qkv_mixed, value_flat, 0);
+    cb(qkv_mixed, "qkv_mixed_concatenated", il);
+
+    // Calculate the total conv dimension
     int64_t qkv_dim = head_k_dim * num_k_heads * 2 + head_v_dim * num_v_heads;
+
+    // Reshape to [n_tokens, qkv_dim, n_seqs] for proper convolution input format
+    qkv_mixed = ggml_reshape_3d(ctx0, qkv_mixed, n_tokens, qkv_dim, n_seqs);
+    cb(qkv_mixed, "qkv_mixed_for_conv", il);
 
     // Calculate convolution kernel size
     const int64_t conv_kernel_size = model.layers[il].ssm_conv1d->ne[0];
-    conv_states                    = ggml_reshape_3d(ctx0, conv_states, conv_kernel_size - 1,
-                                                     d_inner + 2 * hparams.ssm_n_group * hparams.ssm_d_state, n_seqs);
+    conv_states = ggml_reshape_3d(ctx0, conv_states, conv_kernel_size - 1, d_inner + 2 * hparams.ssm_n_group * hparams.ssm_d_state, n_seqs);
     cb(conv_states, "conv_states_reshaped", il);
 
-    // Reshape to [input_dim, n_seq_tokens, n_seqs] for concatenation
-    qkv_mixed = ggml_reshape_3d(ctx0, qkv_mixed, qkv_dim, n_seq_tokens, n_seqs);
-    cb(qkv_mixed, "qkv_mixed_for_conv", il);
-
-    // Concatenate cached conv states with current input
-    // conv_states: [conv_kernel_size - 1, input_dim, n_seqs]
-    // qkv_mixed: [input_dim, n_seq_tokens, n_seqs]
-    // After transpose: [n_seq_tokens, input_dim, n_seqs]
-    ggml_tensor * conv_input = ggml_concat(ctx0, conv_states, ggml_transpose(ctx0, qkv_mixed), 0);
+    // Now concatenate along the sequence dimension (dim 0 in Llama.cpp)
+    ggml_tensor * conv_input = ggml_concat(ctx0, conv_states, qkv_mixed, 0);    
     cb(conv_input, "conv_input", il);
 
     // Apply convolution

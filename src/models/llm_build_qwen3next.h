@@ -47,4 +47,7 @@ private:
     ggml_tensor * build_layer_ffn(ggml_tensor * cur, const llama_model & model, const int il);
 
     ggml_tensor * softplus(ggml_tensor * alpha, ggml_tensor * dt_bias);
+
+    ggml_tensor * build_q3n_norm(struct ggml_tensor * input, struct ggml_tensor * weights, int layer);
+
 };
