@@ -1,11 +1,13 @@
-#include "../llama-model.h"
-#include "../llama-graph.h"
-#include "llm_graph_context_mamba.h"
 
+#include "../llama-graph.h"
+#include "../llama-model.h"
+
+#include "llm_graph_context_mamba.h"
 #include "llm_build_mamba.h"
+
 #include <cmath>
 
-llm_build_mamba::llm_build_mamba(const llama_model & model, const llm_graph_params & params) : llm_graph_context(params) {
+llm_build_mamba::llm_build_mamba(const llama_model & model, const llm_graph_params & params) : llm_graph_context_mamba(params) {
     ggml_tensor * cur;
     ggml_tensor * inpL;
 
@@ -18,22 +20,20 @@ llm_build_mamba::llm_build_mamba(const llama_model & model, const llm_graph_para
 
     for (int il = 0; il < n_layer; ++il) {
         // norm
-        cur = build_norm(inpL,
-                model.layers[il].attn_norm, NULL,
-                LLM_NORM_RMS, il);
+        cur = build_norm(inpL, model.layers[il].attn_norm, NULL, LLM_NORM_RMS, il);
         cb(cur, "attn_norm", il);
 
         if (model.arch == LLM_ARCH_MAMBA2) {
-            // TODO: implement mamba2_layer inline
-            // cur = build_mamba2_layer(rs_inp, cur, model, ubatch, il);
+            cur = build_mamba2_layer(rs_inp, cur, model, ubatch, il);
         } else {
-            // TODO: implement mamba_layer inline
-            // cur = build_mamba_layer(rs_inp, cur, model, ubatch, il);
+            cur = build_mamba_layer(rs_inp, cur, model, ubatch, il);
         }
+
         if (il == n_layer - 1 && inp_out_ids) {
-            cur  = ggml_get_rows(ctx0,  cur, inp_out_ids);
+            cur  = ggml_get_rows(ctx0, cur, inp_out_ids);
             inpL = ggml_get_rows(ctx0, inpL, inp_out_ids);
         }
+
         // residual
         cur = ggml_add(ctx0, cur, inpL);
 
@@ -43,7 +43,7 @@ llm_build_mamba::llm_build_mamba(const llama_model & model, const llm_graph_para
         // input for next layer
         inpL = cur;
     }
-;
+
     // final rmsnorm
     cur = build_norm(inpL, model.output_norm, NULL, LLM_NORM_RMS, -1);
 
