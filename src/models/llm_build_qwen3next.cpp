@@ -1,4 +1,5 @@
 #include "llm_build_qwen3next.h"
+#include "../../ggml/src/ggml-impl.h"
 
 #include <cmath>
 
@@ -98,7 +99,7 @@ struct ggml_tensor * llm_build_qwen3next::build_q3n_norm(struct ggml_tensor * in
     return build_norm(input, input_norm, nullptr, LLM_NORM_RMS, layer);
 }
 
-ggml_tensor * llm_build_qwen3next::build_qwen3next_attention_layer(ggml_tensor *             cur,
+struct ggml_tensor * llm_build_qwen3next::build_qwen3next_attention_layer(ggml_tensor *             cur,
                                                                    ggml_tensor *             inp_pos,
                                                                    llm_graph_input_attn_kv * inp_attn,
                                                                    const llama_model &       model,
@@ -152,12 +153,177 @@ ggml_tensor * llm_build_qwen3next::build_qwen3next_attention_layer(ggml_tensor *
     return cur;
 }
 
+// delta_net
+// prepare all the tensor data for the operation so we only
+// do the absolutely necessary steps in the op itself
+struct ggml_tensor * llm_build_qwen3next::delta_net(
+        struct ggml_context * ctx,
+        struct ggml_tensor  * q,
+        struct ggml_tensor  * k,
+        struct ggml_tensor  * v,
+        struct ggml_tensor  * g,
+        struct ggml_tensor  * beta,
+        struct ggml_tensor  * state,
+        bool                  use_qk_l2norm,
+        float                 eps_norm,
+        const int             il
+    ) {
+    GGML_ASSERT(ggml_is_contiguous(q));
+    GGML_ASSERT(ggml_is_contiguous(k));
+    GGML_ASSERT(ggml_is_contiguous(v));
+    GGML_ASSERT(ggml_is_contiguous(g));
+    GGML_ASSERT(ggml_is_contiguous(beta));
+    GGML_ASSERT(ggml_is_contiguous(state));
+
+    const int64_t S_k = q->ne[0];
+    const int64_t H_k = q->ne[1];
+    const int64_t n_tokens = q->ne[2];
+    const int64_t n_seqs = q->ne[3];
+
+    const int64_t S_v = v->ne[0];
+    const int64_t H_v = v->ne[1];
+
+    GGML_ASSERT(v->ne[2] == n_tokens);
+    GGML_ASSERT(k->ne[2] == n_tokens);
+    GGML_ASSERT(g->ne[0] == H_v && g->ne[1] == n_tokens && g->ne[2] == n_seqs);
+    GGML_ASSERT(beta->ne[0] == H_v && beta->ne[2] == n_tokens && beta->ne[3] == n_seqs);
+    GGML_ASSERT(state->ne[0] == S_v && state->ne[1] == S_v * H_v && state->ne[2] == 1 && state->ne[3] == 1);
+
+    GGML_ASSERT(q->ne[0] == S_k && q->ne[1] == H_k && q->ne[2] == n_tokens && q->ne[3] == n_seqs);
+    GGML_ASSERT(k->ne[0] == S_k && k->ne[1] == H_k && k->ne[2] == n_tokens && k->ne[3] == n_seqs);
+
+    GGML_ASSERT(H_k == H_v); // we did a repeat to make sure this is the case
+
+    cb(q, "q_prenorm", il);
+    cb(k, "k_prenorm", il);
+
+    if (use_qk_l2norm) {
+        q = ggml_l2_norm(ctx, q, eps_norm);
+        k = ggml_l2_norm(ctx, k, eps_norm);
+    }
+
+    cb(k, "k_postnorm", il);
+    cb(q, "q_prescale", il);
+
+    int64_t pad_size = (GGML_DELTA_NET_CHUNK - n_tokens % GGML_DELTA_NET_CHUNK) % GGML_DELTA_NET_CHUNK;
+    // yes, n_tokens, not H_k, the reference implementation has wrong naming
+    int64_t num_chunks = (n_tokens + pad_size) / GGML_DELTA_NET_CHUNK;
+
+    float scale = 1.0f / sqrtf(S_v);
+    q = ggml_scale(ctx, q, scale);
+
+    cb(beta, "beta_raw", il);
+    beta = ggml_sigmoid(ctx, beta);
+
+    cb(q, "q_postscale", il);
+    cb(beta, "beta_sigmoid", il);   
+
+    // First, permute to chunked format: [S_k, n_tokens, H_k, n_seqs]
+    q = ggml_cont(ctx, ggml_permute(ctx, q, 0, 2, 1, 3));
+    cb(q, "q_reshape", il);
+    k = ggml_cont(ctx, ggml_permute(ctx, k, 0, 2, 1, 3));
+    cb(k, "k_reshape", il);
+    v = ggml_cont(ctx, ggml_permute(ctx, v, 0, 2, 1, 3));
+    cb(v, "v_reshape", il);
+    
+    beta = ggml_cont(ctx, ggml_permute(ctx, beta, 1, 2, 0, 3));
+    cb(beta, "beta_reshape", il);
+
+    g = ggml_cont(ctx, ggml_permute(ctx, g, 1, 0, 3, 2));
+    cb(g, "g_reshape", il);
+
+    // Then, pad the second dimension (n_tokens) to chunk_size
+    q = ggml_pad(ctx, q, 0, pad_size, 0, 0); 
+    k = ggml_pad(ctx, k, 0, pad_size, 0, 0);
+    v = ggml_pad(ctx, v, 0, pad_size, 0, 0);
+    // ... except for beta and g, where we pad the last dimension
+    beta = ggml_pad(ctx, beta, pad_size, 0, 0, 0);
+    g = ggml_pad(ctx, g, pad_size, 0, 0, 0);
+
+    cb(q, "q_pad", il);
+    cb(k, "k_pad", il);
+    cb(v, "v_pad", il);
+    cb(beta, "beta_pad", il);
+    cb(g, "g_pad", il);
+    
+    GGML_ASSERT(q->ne[1] % GGML_DELTA_NET_CHUNK == 0 && q->ne[0] == S_k && q->ne[2] == H_k && q->ne[3] == n_seqs);
+    GGML_ASSERT(k->ne[1] % GGML_DELTA_NET_CHUNK == 0 && k->ne[0] == S_k && k->ne[2] == H_k && k->ne[3] == n_seqs);
+    GGML_ASSERT(v->ne[1] % GGML_DELTA_NET_CHUNK == 0 && v->ne[0] == S_v && v->ne[2] == H_k && v->ne[3] == n_seqs);
+    GGML_ASSERT(beta->ne[0] % GGML_DELTA_NET_CHUNK == 0 && beta->ne[1] == H_k && beta->ne[2] == 1 && beta->ne[3] == n_seqs);
+    GGML_ASSERT(g->ne[0] % GGML_DELTA_NET_CHUNK == 0 && g->ne[1] == H_k && g->ne[2] == 1 && g->ne[3] == n_seqs);
+
+    ggml_tensor * beta_unsq = ggml_cont_4d(ctx, beta, 1, num_chunks * GGML_DELTA_NET_CHUNK, H_k, n_seqs);
+    ggml_tensor * beta_bcast = ggml_repeat_4d(ctx, beta_unsq, S_v, num_chunks * GGML_DELTA_NET_CHUNK, H_k, n_seqs);
+    cb(beta_unsq, "beta_unsq", il);
+    cb(beta_bcast, "beta_bcast", il);
+
+    struct ggml_tensor * v_beta = ggml_mul(ctx, v, beta_bcast);
+    cb(v_beta, "v_beta", il);
+    struct ggml_tensor * k_beta = ggml_mul(ctx, k, beta_bcast);
+    cb(k_beta, "k_beta", il);
+    struct ggml_tensor * g_cumsum = ggml_cumsum(ctx, g);
+    cb(g_cumsum, "g_cumsum", il);
+        
+    struct ggml_tensor * gcs_i = ggml_cont_4d(ctx, g_cumsum, num_chunks * GGML_DELTA_NET_CHUNK, 1, H_v, n_seqs);  // [chunk_size, 1, n_tokens, n_seqs]
+    struct ggml_tensor * gcs_j = ggml_cont_4d(ctx, g_cumsum, 1, num_chunks * GGML_DELTA_NET_CHUNK, H_v, n_seqs);  // [1, chunk_size, n_tokens, n_seqs]
+    
+    // Broadcast both tensors to [chunk_size, chunk_size, H_v, n_seqs]
+    struct ggml_tensor * gcs_i_broadcast = ggml_repeat_4d(ctx, gcs_i, num_chunks * GGML_DELTA_NET_CHUNK, num_chunks * GGML_DELTA_NET_CHUNK, H_v, n_seqs);  // [chunk_size, 1, H_v, n_seqs] -> [chunk_size, chunk_size, H_v, n_seqs]
+    struct ggml_tensor * gcs_j_broadcast = ggml_repeat_4d(ctx, gcs_j, num_chunks * GGML_DELTA_NET_CHUNK, num_chunks * GGML_DELTA_NET_CHUNK, H_v, n_seqs);  // [1, chunk_size, H_v, n_seqs] -> [chunk_size, chunk_size, H_v, n_seqs]
+    
+    struct ggml_tensor * decay_mask = ggml_sub(ctx, gcs_j_broadcast, gcs_i_broadcast); 
+    cb(decay_mask, "sub", il);
+    
+    // Apply lower triangular mask to ensure attention is causal (only past tokens influence current)
+    decay_mask = ggml_tri_keep(ctx, decay_mask, GGML_TRI_TYPE_LOWER_DIAG); 
+    cb(decay_mask, "sub_tri", il);
+    // Apply exponential to get the decay mask values
+    decay_mask = ggml_exp(ctx, decay_mask);
+    cb(decay_mask, "sub_tri_exp", il);
+    // Apply lower triangular mask again to ensure only lower triangular values remain
+    decay_mask = ggml_tri_keep(ctx, decay_mask, GGML_TRI_TYPE_LOWER_DIAG);
+    cb(decay_mask, "decay_mask", il);
+
+    struct ggml_tensor * kmulkbeta = ggml_mul_mat(ctx, ggml_cont(ctx, k_beta), ggml_cont(ctx, k));
+    cb(kmulkbeta, "k @ k_beta", il);
+    
+    struct ggml_tensor * k_decay = ggml_mul(ctx, kmulkbeta, decay_mask);
+    cb(k_decay, "(k @ k_beta) * decay_mask", il);
+
+    struct ggml_tensor * attn = ggml_neg(ctx, ggml_tri_keep(ctx, k_decay, GGML_TRI_TYPE_LOWER));
+    cb(attn, "attn_in", il);
+
+    // We'll be returning the result as a 1D tensor due to the dimensions mismatch of the state and output tensors
+    // Use original n_tokens for output size and padded chunk size for state size
+    const int64_t ne[1] = { (S_v * H_v * n_tokens) + (S_v * S_v * H_v * n_seqs) };
+    struct ggml_tensor * result = ggml_new_tensor(ctx, GGML_TYPE_F32, 1, ne);
+
+    ggml_set_op_params_i32(result, 0, H_v);
+    ggml_set_op_params_i32(result, 1, S_k);
+    ggml_set_op_params_i32(result, 2, S_v);
+    ggml_set_op_params_i32(result, 3, n_tokens); // Pass original n_tokens
+
+    result->op     = GGML_OP_DELTA_NET;
+    result->src[0] = q;
+    result->src[1] = k;
+    result->src[2] = v;
+    result->src[3] = g_cumsum;
+    result->src[4] = state;
+    result->src[5] = decay_mask;
+    result->src[6] = v_beta;
+    result->src[7] = k_beta;
+    result->src[8] = attn;
+
+    return result;
+}
+
+
 ggml_tensor * llm_build_qwen3next::build_qwen3next_linear_attn_layer(llm_graph_input_rs * inp,
                                                                      ggml_tensor *        cur,
                                                                      const llama_model &  model,
                                                                      const llama_ubatch & ubatch,
                                                                      int                  il) {
-    // Gated Delta Net implementation using the new ggml_delta_net function
+    // Gated Delta Net implementation using the new delta_net function
     const auto * mctx_cur = inp->mctx;
 
     const int64_t d_inner  = hparams.ssm_d_inner;
@@ -352,31 +518,25 @@ ggml_tensor * llm_build_qwen3next::build_qwen3next_linear_attn_layer(llm_graph_i
     k_conv = ggml_cont_4d(ctx0, k_conv, head_k_dim, num_k_heads, n_tokens, n_seqs);
     v_conv = ggml_cont_4d(ctx0, v_conv, head_v_dim, num_v_heads, n_tokens, n_seqs);
 
-    beta  = ggml_cont_4d(ctx0, b, 1, num_v_heads, n_tokens, n_seqs);
-    alpha = ggml_cont_4d(ctx0, a, 1, num_v_heads, n_tokens, n_seqs);
+    beta  = ggml_cont_4d(ctx0, b, num_v_heads, 1, n_tokens, n_seqs);
 
     ggml_tensor * state = ggml_reshape_4d(ctx0, ssm_states_all, head_dim, head_dim * n_heads, 1, 1);
-    gate = ggml_reshape_4d(ctx0, gate, 1, n_heads, n_tokens, n_seqs);
 
-        // if head keys and value keys are different, repeat to force tensors into matching shapes
+    // if head keys and value keys are different, repeat to force tensors into matching shapes
     if (num_k_heads != num_v_heads) {
         GGML_ASSERT(num_v_heads % num_k_heads == 0);
         int64_t repeat_factor = num_v_heads / num_k_heads;
 
-        q_conv = ggml_cont_4d(ctx0, q_conv, head_k_dim, n_tokens, num_k_heads, n_seqs);
-        k_conv = ggml_cont_4d(ctx0, k_conv, head_k_dim, n_tokens, num_k_heads, n_seqs);
-
-        q_conv = ggml_repeat_4d(ctx0, q_conv, head_k_dim, n_tokens * repeat_factor, num_k_heads, n_seqs);
-        k_conv = ggml_repeat_4d(ctx0, k_conv, head_k_dim, n_tokens * repeat_factor, num_k_heads, n_seqs);
-
-        // Fix dimension order: last two should be [tokens, batches]
-        q_conv = ggml_reshape_4d(ctx0, q_conv, head_k_dim, num_v_heads, n_tokens, n_seqs);
-        k_conv = ggml_reshape_4d(ctx0, k_conv, head_k_dim, num_v_heads, n_tokens, n_seqs);
+        q_conv = ggml_repeat_4d(ctx0, q_conv, head_k_dim, num_k_heads * repeat_factor, n_tokens, n_seqs);
+        k_conv = ggml_repeat_4d(ctx0, k_conv, head_k_dim, num_k_heads * repeat_factor, n_tokens, n_seqs);
     }
 
-    // Call the new ggml_delta_net function with the corrected flow
-    const float kq_scale = hparams.f_attention_scale == 0.0f ? 1.0f / sqrtf(float(num_k_heads)) : hparams.f_attention_scale;
-    ggml_tensor * attn_out = ggml_delta_net(ctx0, q_conv, k_conv, v_conv, gate, beta, state, true, kq_scale, hparams.f_norm_rms_eps);
+    cb(q_conv, "q_conv_predelta", il);
+    cb(k_conv, "k_conv_predelta", il);
+    cb(v_conv, "v_conv_predelta", il);
+
+    // Call the new delta_net function with the corrected flow
+    ggml_tensor * attn_out = delta_net(ctx0, q_conv, k_conv, v_conv, gate, beta, state, true, hparams.f_norm_rms_eps, il);
     cb(attn_out, "attn_out", il);
 
     // The tensors were concatenated 1d, so we need to extract them 1d as well

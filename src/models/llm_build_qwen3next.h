@@ -10,17 +10,18 @@ struct llm_build_qwen3next : public llm_graph_context_mamba {
     llm_build_qwen3next(const llama_model & model, const llm_graph_params & params);
 
 private:
-    // ggml_delta_net
-    ggml_tensor * ggml_delta_net_op(struct ggml_tensor * q,
-                                   struct ggml_tensor * k,
-                                   struct ggml_tensor * v,
-                                   struct ggml_tensor * g,
-                                   struct ggml_tensor * beta,
-                                   struct ggml_tensor * state,
-                                   bool                 use_qk_l2norm,
-                                   float                scale,
-                                   float                eps_norm,
-                                   int                  il);
+    // delta_net
+    struct ggml_tensor * delta_net(
+        struct ggml_context * ctx,
+        struct ggml_tensor  * q,
+        struct ggml_tensor  * k,
+        struct ggml_tensor  * v,
+        struct ggml_tensor  * g,
+        struct ggml_tensor  * beta,
+        struct ggml_tensor  * state,
+        bool                  use_qk_l2norm,
+        float                 eps_norm,
+        const int             il);
 
     ggml_tensor * build_qwen3next_attention_layer(ggml_tensor *             cur,
                                                   ggml_tensor *             inp_pos,
