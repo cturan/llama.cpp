@@ -284,17 +284,16 @@ struct ggml_tensor * llm_build_qwen3next::delta_net(
     decay_mask = ggml_tri_keep(ctx, decay_mask, GGML_TRI_TYPE_LOWER_DIAG);
     cb(decay_mask, "decay_mask", il);
 
-    struct ggml_tensor * kmulkbeta = ggml_mul_mat(ctx, ggml_cont(ctx, k_beta), ggml_cont(ctx, k));
-    cb(kmulkbeta, "k @ k_beta", il);
+    struct ggml_tensor * kmulkbeta = ggml_mul_mat(ctx, ggml_cont(ctx, k), ggml_cont(ctx, k_beta));
+    cb(kmulkbeta, "k_beta @ k_t ", il);
     
     struct ggml_tensor * k_decay = ggml_mul(ctx, kmulkbeta, decay_mask);
-    cb(k_decay, "(k @ k_beta) * decay_mask", il);
+    cb(k_decay, "(k_beta @ k_t) * decay_mask", il);
 
     struct ggml_tensor * attn = ggml_neg(ctx, ggml_tri_keep(ctx, k_decay, GGML_TRI_TYPE_LOWER));
     cb(attn, "attn_in", il);
 
     // We'll be returning the result as a 1D tensor due to the dimensions mismatch of the state and output tensors
-    // Use original n_tokens for output size and padded chunk size for state size
     const int64_t ne[1] = { (S_v * H_v * n_tokens) + (S_v * S_v * H_v * n_seqs) };
     struct ggml_tensor * result = ggml_new_tensor(ctx, GGML_TYPE_F32, 1, ne);
 

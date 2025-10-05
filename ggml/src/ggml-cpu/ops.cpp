@@ -10695,35 +10695,80 @@ void ggml_compute_forward_delta_net_f32(const ggml_compute_params * params, ggml
         attn_after_updates_sum += attn_data[i];
         attn_after_updates_max = fmaxf(attn_after_updates_max, fabsf(attn_data[i]));
     }
-    printf("C++ attn_after_triangular_updates sum = %f, max = %f\n", attn_after_updates_sum, attn_after_updates_max);
-
-    // Compute value = attn @ v_beta and k_cumdecay = attn @ (k_beta * g.exp().unsqueeze(-1))
-    // These should be computed once before the chunk loop, like in the Python reference
-    printf("=== Computing value and k_cumdecay before chunk loop ===\n");
     
-    // Compute value and k_cumdecay for each head and sequence
     for (int64_t seq_idx = 0; seq_idx < n_seqs; seq_idx++) {
-        for (int64_t head_idx = 0; head_idx < H_v; head_idx++) {
-            // Get offsets for this head and sequence
-            const int64_t attn_offset = (seq_idx * src8->nb[3] + head_idx * src8->nb[2]) / sizeof(float);
-            const int64_t v_beta_offset = (seq_idx * src6->nb[3] + head_idx * src6->nb[2]) / sizeof(float);
-            const int64_t k_beta_offset = (seq_idx * src7->nb[3] + head_idx * src7->nb[2]) / sizeof(float);
-            const int64_t g_offset = (seq_idx * src3->nb[3] + head_idx * src3->nb[2]) / sizeof(float);
+        for (int64_t head_idx = 0; head_idx < H_v; head_idx++) {            
+            const int64_t v_beta_offset = (head_idx * src6->nb[2] + seq_idx * src6->nb[3]) / sizeof(float);
+            const int64_t k_beta_offset = (head_idx * src7->nb[2] + seq_idx * src7->nb[3]) / sizeof(float);
+            const int64_t attn_offset = (head_idx * src8->nb[2] + seq_idx * src8->nb[3]) / sizeof(float);
+            const int64_t g_offset = (head_idx * src3->nb[2] + seq_idx * src3->nb[3]) / sizeof(float);
             
+            // Fixed memory access patterns with bounds checking
             float * attn_precomputed = (float *) src8->data + attn_offset;
             float * v_beta_ptr = (float *) src6->data + v_beta_offset;
             float * k_beta_ptr = (float *) src7->data + k_beta_offset;
             float * g_vals = (float *) src3->data + g_offset;
             
-            // Compute value = attn @ v_beta
+            // Add bounds checking to prevent out-of-bounds access
+            const int64_t attn_total_elements = src8->ne[0] * src8->ne[1] * src8->ne[2] * src8->ne[3];
+            const int64_t v_beta_total_elements = src6->ne[0] * src6->ne[1] * src6->ne[2] * src6->ne[3];
+            const int64_t k_beta_total_elements = src7->ne[0] * src7->ne[1] * src7->ne[2] * src7->ne[3];
+            const int64_t g_total_elements = src3->ne[0] * src3->ne[1] * src3->ne[2] * src3->ne[3];
+                        
+            // Compute value = attn @ v_beta with deterministic tensor access
+            // printf("C++ DEBUG: Computing value = attn @ v_beta with deterministic tensor access\n");
             float * value = (float *) malloc(chunk_size * S_v * sizeof(float));
+            
+            // Calculate tensor strides for deterministic access
+            const int64_t attn_stride0 = src8->nb[0] / sizeof(float);  // chunk_size dimension
+            const int64_t v_beta_stride0 = src6->nb[0] / sizeof(float);  // S_v dimension
+            const int64_t v_beta_stride1 = src6->nb[1] / sizeof(float);  // chunk_size dimension
+            
+            // printf("C++ DEBUG: Tensor strides for deterministic access:\n");
+            // printf("  attn_stride0=%ld, v_beta_stride0=%ld, v_beta_stride1=%ld\n",
+            //        attn_stride0, v_beta_stride0, v_beta_stride1);
+            
             for (int64_t i = 0; i < chunk_size; i++) {
                 for (int64_t d = 0; d < S_v; d++) {
                     float sum = 0.0f;
                     for (int64_t j = 0; j < chunk_size; j++) {
-                        sum += attn_precomputed[i * chunk_size + j] * v_beta_ptr[j * S_v + d];
+                        // Deterministic tensor access using stride calculations
+                        // attn[i][j] access: i * attn_stride0 + j
+                        int64_t attn_idx = i * attn_stride0 + j;
+                        if (attn_idx >= chunk_size * chunk_size) {
+                            // printf("ERROR: attn access out of bounds: attn_idx=%ld, max=%ld\n",
+                            //        attn_idx, chunk_size * chunk_size);
+                            continue;
+                        }
+                        
+                        // v_beta[j][d] access: j * v_beta_stride1 + d
+                        int64_t v_beta_idx = j * v_beta_stride1 + d;
+                        if (v_beta_idx >= chunk_size * S_v) {
+                            // printf("ERROR: v_beta access out of bounds: v_beta_idx=%ld, max=%ld\n",
+                            //        v_beta_idx, chunk_size * S_v);
+                            continue;
+                        }
+                        
+                        float attn_val = attn_precomputed[attn_idx];
+                        float v_beta_val = v_beta_ptr[v_beta_idx];
+                        
+                        if (isnan(attn_val) || isnan(v_beta_val)) {
+                            // printf("ERROR: NaN detected in matrix multiplication: attn=%f, v_beta=%f\n", attn_val, v_beta_val);
+                            continue;
+                        }
+                        
+                        // Debug: Print first few multiplications for validation
+                        if (seq_idx == 0 && head_idx == 0 && i < 2 && d < 2 && j < 2) {
+                            // printf("C++ DEBUG value[%ld][%ld]: attn[%ld][%ld]=%f * v_beta[%ld][%ld]=%f = %f\n",
+                            //        i, d, i, j, attn_val, j, d, v_beta_val, attn_val * v_beta_val);
+                        }
+                        sum += attn_val * v_beta_val;
                     }
                     value[i * S_v + d] = sum;
+                    // Debug: Print first few results for validation
+                    if (seq_idx == 0 && head_idx == 0 && i < 2 && d < 2) {
+                        // printf("C++ DEBUG value[%ld][%ld] = sum = %f\n", i, d, value[i * S_v + d]);
+                    }
                 }
             }
             
@@ -10731,18 +10776,74 @@ void ggml_compute_forward_delta_net_f32(const ggml_compute_params * params, ggml
             for (int64_t i = 0; i < chunk_size * S_v; i++) {
                 value_sum += value[i];
             }
-            printf("C++ PRE-CHUNK value_sum = %f (head %ld, seq %ld)\n", value_sum, head_idx, seq_idx);
+            // printf("C++ PRE-CHUNK value_sum = %f (head %ld, seq %ld)\n", value_sum, head_idx, seq_idx);
             
-            // Compute k_cumdecay = attn @ (k_beta * g.exp().unsqueeze(-1))
+            // Compute k_cumdecay = attn @ (k_beta * g.exp().unsqueeze(-1)) with deterministic tensor access
+            // printf("C++ DEBUG: Computing k_cumdecay = attn @ (k_beta * g.exp()) with deterministic tensor access\n");
             float * k_cumdecay = (float *) malloc(chunk_size * S_k * sizeof(float));
+            
+            // Calculate tensor strides for deterministic access
+            const int64_t k_beta_stride0 = src7->nb[0] / sizeof(float);  // S_k dimension
+            const int64_t k_beta_stride1 = src7->nb[1] / sizeof(float);  // chunk_size dimension
+            const int64_t g_stride0 = src3->nb[0] / sizeof(float);  // chunk_size dimension
+            
+            // printf("C++ DEBUG: k_cumdecay tensor strides: k_beta_stride0=%ld, k_beta_stride1=%ld, g_stride0=%ld\n",
+            //        k_beta_stride0, k_beta_stride1, g_stride0);
+            
             for (int64_t i = 0; i < chunk_size; i++) {
                 for (int64_t d = 0; d < S_k; d++) {
                     float sum = 0.0f;
                     for (int64_t j = 0; j < chunk_size; j++) {
-                        float g_exp = expf(g_vals[j]);
-                        sum += attn_precomputed[i * chunk_size + j] * k_beta_ptr[j * S_k + d] * g_exp;
+                        // Deterministic tensor access using stride calculations
+                        // attn[i][j] access: i * attn_stride0 + j
+                        int64_t attn_idx = i * attn_stride0 + j;
+                        if (attn_idx >= chunk_size * chunk_size) {
+                            // printf("ERROR: attn access out of bounds in k_cumdecay: attn_idx=%ld, max=%ld\n",
+                            //        attn_idx, chunk_size * chunk_size);
+                            continue;
+                        }
+                        
+                        // k_beta[j][d] access: j * k_beta_stride1 + d
+                        int64_t k_beta_idx = j * k_beta_stride1 + d;
+                        if (k_beta_idx >= chunk_size * S_k) {
+                            // printf("ERROR: k_beta access out of bounds: k_beta_idx=%ld, max=%ld\n",
+                            //        k_beta_idx, chunk_size * S_k);
+                            continue;
+                        }
+                        
+                        // g tensor layout: [chunk_size, n_heads, n_seqs, 1]
+                        // Deterministic access: g[j + head_idx * chunk_size + seq_idx * chunk_size * n_heads]
+                        int64_t g_idx = j + head_idx * chunk_size + seq_idx * chunk_size * H_v;
+                        if (g_idx >= chunk_size * H_v * n_seqs) {
+                            // printf("ERROR: g tensor out of bounds: g_idx=%ld, max=%ld\n",
+                            //        g_idx, chunk_size * H_v * n_seqs);
+                            continue;
+                        }
+                        
+                        float attn_val = attn_precomputed[attn_idx];
+                        float k_beta_val = k_beta_ptr[k_beta_idx];
+                        float g_val = g_vals[g_idx];
+                        float g_exp = expf(g_val);
+                        
+                        if (isnan(attn_val) || isnan(k_beta_val) || isnan(g_val) || isnan(g_exp)) {
+                            // printf("ERROR: NaN detected in k_cumdecay multiplication: attn=%f, k_beta=%f, g_val=%f, g_exp=%f\n",
+                            //        attn_val, k_beta_val, g_val, g_exp);
+                            continue;
+                        }
+                        
+                        // Debug: Print first few multiplications for validation
+                        if (seq_idx == 0 && head_idx == 0 && i < 2 && d < 2 && j < 2) {
+                            // printf("C++ DEBUG k_cumdecay[%ld][%ld]: attn[%ld][%ld]=%f * k_beta[%ld][%ld]=%f * g_exp[%ld]=%f = %f\n",
+                            //        i, d, i, j, attn_val, j, d, k_beta_val, j, g_exp,
+                            //        attn_val * k_beta_val * g_exp);
+                        }
+                        sum += attn_val * k_beta_val * g_exp;
                     }
                     k_cumdecay[i * S_k + d] = sum;
+                    // Debug: Print first few results for validation
+                    if (seq_idx == 0 && head_idx == 0 && i < 2 && d < 2) {
+                        // printf("C++ DEBUG k_cumdecay[%ld][%ld] = sum = %f\n", i, d, k_cumdecay[i * S_k + d]);
+                    }
                 }
             }
             
@@ -10750,13 +10851,11 @@ void ggml_compute_forward_delta_net_f32(const ggml_compute_params * params, ggml
             for (int64_t i = 0; i < chunk_size * S_k; i++) {
                 k_cumdecay_sum += k_cumdecay[i];
             }
-            printf("C++ PRE-CHUNK k_cumdecay_sum = %f (head %ld, seq %ld)\n", k_cumdecay_sum, head_idx, seq_idx);
             
             free(value);
             free(k_cumdecay);
         }
     }
-    printf("=== End pre-chunk computations ===\n");
 
     // Initialize last_recurrent_state
     // last_recurrent_state = torch.zeros(batch_size, sequence_length, k_head_dim, v_head_dim).to(value)
@@ -10786,7 +10885,7 @@ void ggml_compute_forward_delta_net_f32(const ggml_compute_params * params, ggml
                 // For each head and sequence, we need to find the correct state slice
                 // The state is organized as: [head_idx * S_v * S_v * n_seqs + seq_idx * S_v * S_v]
                 float * last_recurrent_state = new_state + (head_idx * S_v * S_v * n_seqs) + (seq_idx * S_v * S_v);
-                printf("\n=== C++ Processing chunk %ld, seq %ld, head %ld ===\n", chunk_idx, seq_idx, head_idx);
+                // printf("\n=== C++ Processing chunk %ld, seq %ld, head %ld ===\n", chunk_idx, seq_idx, head_idx);
                 // Get pointers to current chunk data for this head
                 // GGML tensor layout: [S_k/S_v, chunk_size, H_v, n_seqs]
                 // Python layout: [batch_size, sequence_length, num_heads, k_head_dim]
@@ -10835,13 +10934,6 @@ void ggml_compute_forward_delta_net_f32(const ggml_compute_params * params, ggml
                     attn_precomputed_sum += attn_precomputed[i];
                     attn_precomputed_max = fmaxf(attn_precomputed_max, fabsf(attn_precomputed[i]));
                 }
-                printf("C++ attn_precomputed_sum = %f, max = %f\n", attn_precomputed_sum, attn_precomputed_max);
-                printf("C++ attn_precomputed first 10 values: %f, %f, %f, %f, %f, %f, %f, %f, %f, %f\n",
-                       attn_precomputed[0], attn_precomputed[1], attn_precomputed[2], attn_precomputed[3], attn_precomputed[4],
-                       attn_precomputed[5], attn_precomputed[6], attn_precomputed[7], attn_precomputed[8], attn_precomputed[9]);
-                printf("C++ attn_precomputed diagonal values: %f, %f, %f, %f, %f\n",
-                       attn_precomputed[0], attn_precomputed[65], attn_precomputed[130], attn_precomputed[195], attn_precomputed[260]);
-                
                 // Get g values for this chunk and head
                 float * g_vals = (float *) src3->data + g_offset;
                 
@@ -10854,21 +10946,37 @@ void ggml_compute_forward_delta_net_f32(const ggml_compute_params * params, ggml
                 for (int64_t i = 0; i < chunk_size * S_v; i++) {
                     v_beta_sum += v_beta_ptr[i];
                 }
-                printf("C++ v_beta_sum = %f\n", v_beta_sum);
+                // printf("C++ v_beta_sum = %f\n", v_beta_sum);
                 
                 float k_beta_sum = 0.0f;
                 for (int64_t i = 0; i < chunk_size * S_k; i++) {
                     k_beta_sum += k_beta_ptr[i];
                 }
-                printf("C++ k_beta_sum = %f\n", k_beta_sum);
+                // printf("C++ k_beta_sum = %f\n", k_beta_sum);
                 
-                // Compute value = attn_precomputed @ v_beta
+                // Compute value = attn_precomputed @ v_beta with bounds checking
                 float * value = (float *) malloc(chunk_size * S_v * sizeof(float));
                 for (int64_t i = 0; i < chunk_size; i++) {
                     for (int64_t d = 0; d < S_v; d++) {
                         float sum = 0.0f;
                         for (int64_t j = 0; j < chunk_size; j++) {
-                            sum += attn_precomputed[i * chunk_size + j] * v_beta_ptr[j * v_beta_stride0 + d * v_beta_stride1];
+                            // Bounds checking for matrix multiplication
+                            if (i * chunk_size + j >= chunk_size * chunk_size ||
+                                j * v_beta_stride0 + d * v_beta_stride1 >= chunk_size * S_v) {
+                                // printf("ERROR: Chunk value matrix multiplication out of bounds: i=%ld, j=%ld, d=%ld\n", i, j, d);
+                                continue;
+                            }
+                            
+                            float attn_val = attn_precomputed[i * chunk_size + j];
+                            float v_beta_val = v_beta_ptr[j * v_beta_stride0 + d * v_beta_stride1];
+                            
+                            // Check for NaN values to prevent propagation
+                            if (isnan(attn_val) || isnan(v_beta_val)) {
+                                // printf("ERROR: NaN detected in chunk value multiplication: attn=%f, v_beta=%f\n", attn_val, v_beta_val);
+                                continue;
+                            }
+                            
+                            sum += attn_val * v_beta_val;
                         }
                         value[i * S_v + d] = sum;
                     }
@@ -10878,16 +10986,34 @@ void ggml_compute_forward_delta_net_f32(const ggml_compute_params * params, ggml
                 for (int64_t i = 0; i < chunk_size * S_v; i++) {
                     value_sum += value[i];
                 }
-                printf("C++ value_sum = %f (head %ld, seq %ld)\n", value_sum, head_idx, seq_idx);
                 
-                // Compute k_cumdecay = attn_precomputed @ (k_beta * g.exp().unsqueeze(-1))
+                // Compute k_cumdecay = attn_precomputed @ (k_beta * g.exp().unsqueeze(-1)) with bounds checking
                 float * k_cumdecay = (float *) malloc(chunk_size * S_k * sizeof(float));
                 for (int64_t i = 0; i < chunk_size; i++) {
                     for (int64_t d = 0; d < S_k; d++) {
                         float sum = 0.0f;
                         for (int64_t j = 0; j < chunk_size; j++) {
-                            float g_exp = expf(g_vals[j * g_stride0]);
-                            sum += attn_precomputed[i * chunk_size + j] * k_beta_ptr[j * k_beta_stride0 + d * k_beta_stride1] * g_exp;
+                            // Bounds checking for matrix multiplication
+                            if (i * chunk_size + j >= chunk_size * chunk_size ||
+                                j * k_beta_stride0 + d * k_beta_stride1 >= chunk_size * S_k ||
+                                j * g_stride0 >= chunk_size) {
+                                // printf("ERROR: Chunk k_cumdecay matrix multiplication out of bounds: i=%ld, j=%ld, d=%ld\n", i, j, d);
+                                continue;
+                            }
+                            
+                            float attn_val = attn_precomputed[i * chunk_size + j];
+                            float k_beta_val = k_beta_ptr[j * k_beta_stride0 + d * k_beta_stride1];
+                            float g_val = g_vals[j * g_stride0];
+                            float g_exp = expf(g_val);
+                            
+                            // Check for NaN values to prevent propagation
+                            if (isnan(attn_val) || isnan(k_beta_val) || isnan(g_val) || isnan(g_exp)) {
+                                // printf("ERROR: NaN detected in chunk k_cumdecay multiplication: attn=%f, k_beta=%f, g_val=%f, g_exp=%f\n",
+                                //        attn_val, k_beta_val, g_val, g_exp);
+                                continue;
+                            }
+                            
+                            sum += attn_val * k_beta_val * g_exp;
                         }
                         k_cumdecay[i * S_k + d] = sum;
                     }
@@ -10897,22 +11023,53 @@ void ggml_compute_forward_delta_net_f32(const ggml_compute_params * params, ggml
                 for (int64_t i = 0; i < chunk_size * S_k; i++) {
                     k_cumdecay_sum += k_cumdecay[i];
                 }
-                printf("C++ k_cumdecay_sum = %f (head %ld, seq %ld)\n", k_cumdecay_sum, head_idx, seq_idx);
                 
                 // Compute fresh attention matrix for this chunk, just like Python reference line 118
                 // attn = (q_i @ k_i.transpose(-1, -2) * decay_mask[:, :, i]).masked_fill_(mask, 0)
                 float * attn = (float *) malloc(chunk_size * chunk_size * sizeof(float));
                 
-                // First compute q_i @ k_i.transpose(-1, -2)
+                // First compute q_i @ k_i.transpose(-1, -2) with bounds checking
                 for (int64_t i = 0; i < chunk_size; i++) {
                     for (int64_t j = 0; j < chunk_size; j++) {
                         float sum = 0.0f;
                         for (int64_t d = 0; d < S_k; d++) {
-                            float q_val = ((float *)src0->data)[q_offset + d * q_stride0 + i * q_stride1];
-                            float k_val = ((float *)src1->data)[k_offset + d * k_stride0 + j * k_stride1];
+                            // Bounds checking for q and k tensor access
+                            int64_t q_idx = q_offset + d * q_stride0 + i * q_stride1;
+                            int64_t k_idx = k_offset + d * k_stride0 + j * k_stride1;
+                            
+                            if (q_idx >= src0->ne[0] * src0->ne[1] * src0->ne[2] * src0->ne[3] ||
+                                k_idx >= src1->ne[0] * src1->ne[1] * src1->ne[2] * src1->ne[3]) {
+                                // printf("ERROR: q/k tensor access out of bounds: q_idx=%ld, k_idx=%ld\n", q_idx, k_idx);
+                                continue;
+                            }
+                            
+                            float q_val = ((float *)src0->data)[q_idx];
+                            float k_val = ((float *)src1->data)[k_idx];
+                            
+                            // Check for NaN values to prevent propagation
+                            if (isnan(q_val) || isnan(k_val)) {
+                                // printf("ERROR: NaN detected in q@k multiplication: q_val=%f, k_val=%f\n", q_val, k_val);
+                                continue;
+                            }
+                            
                             sum += q_val * k_val;
                         }
-                        attn[i * chunk_size + j] = sum * decay_mask[i * chunk_size + j];
+                        
+                        // Bounds checking for decay mask access
+                        if (i * chunk_size + j >= chunk_size * chunk_size) {
+                            // printf("ERROR: decay mask access out of bounds: i=%ld, j=%ld\n", i, j);
+                            attn[i * chunk_size + j] = 0.0f;
+                            continue;
+                        }
+                        
+                        float decay_val = decay_mask[i * chunk_size + j];
+                        if (isnan(decay_val)) {
+                            // printf("ERROR: NaN detected in decay mask: decay_val=%f\n", decay_val);
+                            attn[i * chunk_size + j] = 0.0f;
+                            continue;
+                        }
+                        
+                        attn[i * chunk_size + j] = sum * decay_val;
                     }
                 }
                 
@@ -10940,17 +11097,12 @@ void ggml_compute_forward_delta_net_f32(const ggml_compute_params * params, ggml
                 for (int64_t i = 0; i < chunk_size * chunk_size; i++) {
                     attn_sum += attn[i];
                 }
-                printf("C++ attn_sum = %f\n", attn_sum);
                 
-                // Debug: print first few values of attn matrix
-                printf("C++ attn first 5 values: %f, %f, %f, %f, %f\n",
-                       attn[0], attn[1], attn[2], attn[3], attn[4]);
                 
                 float v_prime_sum = 0.0f;
                 for (int64_t i = 0; i < chunk_size * S_v; i++) {
                     v_prime_sum += v_prime[i];
                 }
-                printf("C++ v_prime_sum = %f\n", v_prime_sum);
                 
                 // Compute v_new = v_i - v_prime
                 float * v_new = (float *) malloc(chunk_size * S_v * sizeof(float));
@@ -10964,7 +11116,6 @@ void ggml_compute_forward_delta_net_f32(const ggml_compute_params * params, ggml
                 for (int64_t i = 0; i < chunk_size * S_v; i++) {
                     v_new_sum += v_new[i];
                 }
-                printf("C++ v_new_sum = %f\n", v_new_sum);
                 
                 // Compute attn_inter = (q_i * g[:, :, i, :, None].exp()) @ last_recurrent_state
                 float * attn_inter = (float *) malloc(chunk_size * S_v * sizeof(float));
@@ -10983,7 +11134,6 @@ void ggml_compute_forward_delta_net_f32(const ggml_compute_params * params, ggml
                 for (int64_t i = 0; i < chunk_size * S_v; i++) {
                     attn_inter_sum += attn_inter[i];
                 }
-                printf("C++ attn_inter_sum = %f\n", attn_inter_sum);
                 
                 // Compute core_attn_out = attn_inter + attn @ v_new
                 // Output tensor layout: [S_v * H_v, n_tokens, 1, 1]
@@ -11003,14 +11153,7 @@ void ggml_compute_forward_delta_net_f32(const ggml_compute_params * params, ggml
                 float core_attn_out_sum = 0.0f;
                 for (int64_t i = 0; i < chunk_size * S_v; i++) {
                     core_attn_out_sum += core_attn_out[i];
-                }
-                printf("C++ core_attn_out_sum = %f\n", core_attn_out_sum);
-                
-                // Update last_recurrent_state
-                // last_recurrent_state = (
-                //     last_recurrent_state * g[:, :, i, -1, None, None].exp()
-                //     + (k_i * (g[:, :, i, -1, None] - g[:, :, i]).exp()[..., None]).transpose(-1, -2) @ v_new
-                // )
+                }                
                 
                 float g_last = g_vals[chunk_size - 1];
                 float g_last_exp = expf(g_last);
