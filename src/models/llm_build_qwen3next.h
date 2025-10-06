@@ -41,5 +41,6 @@ private:
     ggml_tensor * softplus(ggml_tensor * alpha, ggml_tensor * dt_bias);
 
     ggml_tensor * build_q3n_norm(struct ggml_tensor * input, struct ggml_tensor * weights, int layer);
+    ggml_tensor * build_q3n_gated_norm(struct ggml_tensor * input, struct ggml_tensor * weights, struct ggml_tensor * gate, int layer);
 
 };
