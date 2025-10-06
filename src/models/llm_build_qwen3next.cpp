@@ -229,8 +229,8 @@ struct ggml_tensor * llm_build_qwen3next::delta_net(
     beta = ggml_cont(ctx, ggml_permute(ctx, beta, 1, 2, 0, 3));
     cb(beta, "beta_reshape", il);
 
-    g = ggml_cont(ctx, ggml_permute(ctx, g, 1, 0, 3, 2));
-    cb(g, "g_reshape", il);
+    g = ggml_cont(ctx, ggml_permute(ctx, g, 2, 0, 3, 1));
+    cb(g, "g_permute", il);
 
     // Then, pad the second dimension (n_tokens) to chunk_size
     q = ggml_pad(ctx, q, 0, pad_size, 0, 0); 
@@ -250,7 +250,7 @@ struct ggml_tensor * llm_build_qwen3next::delta_net(
     GGML_ASSERT(k->ne[1] % GGML_DELTA_NET_CHUNK == 0 && k->ne[0] == S_k && k->ne[2] == H_k && k->ne[3] == n_seqs);
     GGML_ASSERT(v->ne[1] % GGML_DELTA_NET_CHUNK == 0 && v->ne[0] == S_v && v->ne[2] == H_k && v->ne[3] == n_seqs);
     GGML_ASSERT(beta->ne[0] % GGML_DELTA_NET_CHUNK == 0 && beta->ne[1] == H_k && beta->ne[2] == 1 && beta->ne[3] == n_seqs);
-    GGML_ASSERT(g->ne[0] % GGML_DELTA_NET_CHUNK == 0 && g->ne[1] == H_k && g->ne[2] == 1 && g->ne[3] == n_seqs);
+    GGML_ASSERT(g->ne[0] % GGML_DELTA_NET_CHUNK == 0 && g->ne[2] == H_k && g->ne[1] == 1 && g->ne[3] == n_seqs);
 
     ggml_tensor * beta_unsq = ggml_cont_4d(ctx, beta, 1, GGML_DELTA_NET_CHUNK * num_chunks, H_k, n_seqs);
     ggml_tensor * beta_bcast = ggml_repeat_4d(ctx, beta_unsq, S_v, GGML_DELTA_NET_CHUNK * num_chunks, H_k, n_seqs);
@@ -265,6 +265,8 @@ struct ggml_tensor * llm_build_qwen3next::delta_net(
     cb(k_beta, "k_beta", il);
     k = ggml_reshape_4d(ctx, k, S_v, GGML_DELTA_NET_CHUNK, H_k * num_chunks, n_seqs);
     cb(k_beta, "k_reshape", il);
+    g = ggml_reshape_4d(ctx, g, GGML_DELTA_NET_CHUNK, 1, H_k * num_chunks, n_seqs);
+    cb(g, "g_reshape", il);
     struct ggml_tensor * g_cumsum = ggml_cumsum(ctx, g);
     cb(g_cumsum, "g_cumsum", il);
         
@@ -298,7 +300,7 @@ struct ggml_tensor * llm_build_qwen3next::delta_net(
     cb(attn, "attn_in", il);
 
     // We'll be returning the result as a 1D tensor due to the dimensions mismatch of the state and output tensors
-    const int64_t ne[1] = { (S_v * H_v * n_tokens) + (S_v * S_v * H_v * n_seqs) };
+    const int64_t ne[1] = { (S_v * H_v * n_tokens * n_seqs ) + (S_v * S_v * H_v * n_seqs) };
     struct ggml_tensor * result = ggml_new_tensor(ctx, GGML_TYPE_F32, 1, ne);
 
     ggml_set_op_params_i32(result, 0, H_v);
@@ -548,7 +550,7 @@ ggml_tensor * llm_build_qwen3next::build_qwen3next_linear_attn_layer(llm_graph_i
         ggml_view_1d(ctx0, attn_out, output_flat_size, 0);
     cb(attn_out_1d, "attn_out_1d", il);
     
-    ggml_tensor * attn_out_final = ggml_cont_4d(ctx0, attn_out_1d, head_dim, n_heads, n_tokens, n_seqs);
+    ggml_tensor * attn_out_final = ggml_cont_4d(ctx0, attn_out_1d, head_dim, n_tokens, n_heads, n_seqs);
     cb(attn_out_final, "attn_out_final", il);
    
     // Extract the state part (second part of the concatenated tensor)
