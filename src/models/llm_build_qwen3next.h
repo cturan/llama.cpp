@@ -36,7 +36,7 @@ private:
                                                     const llama_ubatch & ubatch,
                                                     int                  il);
 
-    ggml_tensor * build_layer_ffn(ggml_tensor * cur, const llama_model & model, const int il);
+    ggml_tensor * build_layer_ffn(ggml_tensor * cur, const llama_model & model, const int il, bool do_residual = true);
 
     ggml_tensor * softplus(ggml_tensor * alpha, ggml_tensor * dt_bias);
 
