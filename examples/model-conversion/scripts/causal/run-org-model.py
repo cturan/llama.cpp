@@ -185,15 +185,16 @@ model_name = os.path.basename(model_path)
 # of using AutoModelForCausalLM.
 print(f"Model class: {model.__class__.__name__}")
 
+device = next(model.parameters()).device
 prompt = "Hello, my name is"
-input_ids = tokenizer(prompt, return_tensors="pt").input_ids
+input_ids = tokenizer(prompt, return_tensors="pt").input_ids.to(device)
 
 print(f"Input tokens: {input_ids}")
 print(f"Input text: {repr(prompt)}")
 print(f"Tokenized: {tokenizer.convert_ids_to_tokens(input_ids[0])}")
 
 with torch.no_grad():
-    outputs = model(input_ids.to("cuda"))
+    outputs = model(input_ids)
     logits = outputs.logits
 
     # Extract logits for the last token (next token prediction)

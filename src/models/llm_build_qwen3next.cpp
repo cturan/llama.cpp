@@ -528,10 +528,9 @@ ggml_tensor * llm_build_qwen3next::build_qwen3next_linear_attn_layer(llm_graph_i
                                                         (conv_kernel_size - 1) * ggml_element_size(conv_output));
     cb(conv_output_no_padding, "conv_output_no_padding", il);
 
-    // Take only the last n_seq_tokens values
-    ggml_tensor * conv_output_proper = ggml_view_4d(ctx0, conv_output_no_padding, n_seq_tokens, conv_output_no_padding->ne[1], 
-        conv_output_no_padding->ne[2], conv_output_no_padding->ne[3], conv_output_no_padding->nb[1], 
-        conv_output_no_padding->nb[2], conv_output_no_padding->nb[3], (conv_output_no_padding->ne[0] - n_seq_tokens) * ggml_element_size(conv_output_no_padding));
+    // Take only the first n_seq_tokens values
+    ggml_tensor * conv_output_proper = ggml_view_4d(ctx0, conv_output_no_padding, n_seq_tokens, conv_output_no_padding->ne[1], conv_output_no_padding->ne[2], conv_output_no_padding->ne[3],
+                                                        conv_output_no_padding->nb[1], conv_output_no_padding->nb[2], conv_output_no_padding->nb[3], 0);
     cb(conv_output_proper, "conv_output_proper", il);
 
     conv_output_proper = ggml_permute(ctx0, conv_output_proper, 0, 1, 3, 2);
