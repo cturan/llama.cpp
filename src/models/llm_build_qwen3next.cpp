@@ -102,7 +102,7 @@ llm_build_qwen3next::llm_build_qwen3next(const llama_model & model, const llm_gr
         cur = build_layer_ffn(attn_post_norm, model, il);
         cb(cur, "ffn_out", il);
         
-        // Residual connection for FFN - add to the tensor BEFORE post_attention_layernorm
+        // Residual connection for FFN - add to the tensor from before post_attention_layernorm
         cur = ggml_add(ctx0, cur, ffn_residual);
         cb(cur, "post_moe", il);
 
@@ -198,9 +198,13 @@ struct ggml_tensor * llm_build_qwen3next::build_qwen3next_attention_layer(ggml_t
     const float kq_scale =
         hparams.f_attention_scale == 0.0f ? 1.0f / sqrtf(float(n_embd_head)) : hparams.f_attention_scale;
     cur = build_attn(inp_attn, nullptr, nullptr, Qcur, Kcur, Vcur, nullptr, nullptr, nullptr, kq_scale, il);
+    cb(cur, "attn_pregate", il);
+
+    struct ggml_tensor * gate_sigmoid = ggml_sigmoid(ctx0, gate);
+    cb(gate_sigmoid, "gate_sigmoid", il);
 
     // Apply gating directly using the original gate tensor
-    cur = ggml_mul(ctx0, cur, ggml_sigmoid(ctx0, gate));
+    cur = ggml_mul(ctx0, cur, gate_sigmoid);
     cb(cur, "attn_gated", il);
 
     cur = build_lora_mm(model.layers[il].wo, cur);

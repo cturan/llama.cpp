@@ -1656,6 +1656,13 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
         }
     ).set_env("LLAMA_ARG_KV_SPLIT"));
     add_opt(common_arg(
+        {"--dump-cache"},
+        "dump cache statistics after each token generation",
+        [](common_params & params) {
+            params.dump_cache = true;
+        }
+    ).set_examples({LLAMA_EXAMPLE_MAIN}));
+    add_opt(common_arg(
         {"--no-context-shift"},
         string_format("disables context shift on infinite text generation (default: %s)", params.ctx_shift ? "disabled" : "enabled"),
         [](common_params & params) {

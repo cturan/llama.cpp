@@ -186,7 +186,10 @@ model_name = os.path.basename(model_path)
 print(f"Model class: {model.__class__.__name__}")
 
 device = next(model.parameters()).device
-prompt = "Hello, my name is"
+if os.getenv("MODEL_TESTING_PROMPT"):
+    prompt = os.getenv("MODEL_TESTING_PROMPT")
+else:
+    prompt = "Hello, my name is"
 input_ids = tokenizer(prompt, return_tensors="pt").input_ids.to(device)
 
 print(f"Input tokens: {input_ids}")
