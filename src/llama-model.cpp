@@ -7134,7 +7134,6 @@ llama_rope_type llama_model_rope_type(const llama_model * model) {
         case LLM_ARCH_ARCEE:
         case LLM_ARCH_ERNIE4_5:
         case LLM_ARCH_ERNIE4_5_MOE:
-        case LLM_ARCH_QWEN3NEXT:
             return LLAMA_ROPE_TYPE_NORM;
 
         // the pairs of head values are offset by n_rot/2
@@ -7154,6 +7153,7 @@ llama_rope_type llama_model_rope_type(const llama_model * model) {
         case LLM_ARCH_QWEN2MOE:
         case LLM_ARCH_QWEN3:
         case LLM_ARCH_QWEN3MOE:
+        case LLM_ARCH_QWEN3NEXT:
         case LLM_ARCH_LLADA_MOE:
         case LLM_ARCH_OLMO2:
         case LLM_ARCH_OLMOE:
