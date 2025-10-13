@@ -242,7 +242,8 @@ static bool ggml_debug(struct ggml_tensor * t, bool ask, void * user_data) {
     if (!ggml_is_quantized(t->type)) {
         uint8_t * data = is_host ? (uint8_t *) t->data : cb_data->data.data();
         ggml_print_tensor(data, t->type, t->ne, t->nb, 3);
-        if (std::string(t->name).substr(0, std::string("post_moe-").size()) == "post_moe-") {
+        if (std::string(t->name).substr(0, std::string("post_moe-").size()) == "post_moe-" || 
+            std::string(t->name).substr(0, std::string("state_1d-").size()) == "state_1d-") {
             if (cb_data->tensors.count(t->name) == 0) {
                 cb_data->tensors[t->name] = 1;
             } else {
@@ -311,9 +312,9 @@ int main(int argc, char ** argv) {
     std::vector<common_chat_msg> chat_msgs;
 
     // load the model and apply lora adapter, if any
-    callback_data cb_data;
-    params.cb_eval = ggml_debug;
-    params.cb_eval_user_data = &cb_data;
+    // callback_data cb_data;
+    // params.cb_eval = ggml_debug;
+    // params.cb_eval_user_data = &cb_data;
     LOG_INF("%s: load the model and apply lora adapter, if any\n", __func__);
     common_init_result llama_init = common_init_from_params(params);
 

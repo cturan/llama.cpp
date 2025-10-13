@@ -23,6 +23,19 @@ private:
         float                 eps_norm,
         const int             il);
 
+    // delta_net_recurrent
+    struct ggml_tensor * delta_net_recurrent(
+        struct ggml_context * ctx,
+        struct ggml_tensor  * q,
+        struct ggml_tensor  * k,
+        struct ggml_tensor  * v,
+        struct ggml_tensor  * g,
+        struct ggml_tensor  * beta,
+        struct ggml_tensor  * state,
+        bool                  use_qk_l2norm,
+        float                 eps_norm,
+        const int             il);
+
     ggml_tensor * build_qwen3next_attention_layer(ggml_tensor *             cur,
                                                   ggml_tensor *             inp_pos,
                                                   llm_graph_input_attn_kv * inp_attn,
