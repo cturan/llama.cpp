@@ -720,7 +720,7 @@ ggml_tensor * llm_build_qwen3next::build_qwen3next_linear_attn_layer(llm_graph_i
     ggml_tensor * conv_output_silu = ggml_silu(ctx0, conv_output_proper);
     cb(conv_output_silu, "conv_output_silu", il);
 
-    ggml_tensor * conv_qkv_mix = ggml_cont_2d(ctx0, conv_output_silu, qkv_dim, n_seq_tokens * n_seqs);
+    ggml_tensor * conv_qkv_mix = ggml_cont_2d(ctx0, ggml_transpose(ctx0, conv_output_silu), qkv_dim, n_seq_tokens * n_seqs);
     cb(conv_qkv_mix, "conv_qkv_mix", il);
 
     // Extract the convolved Q, K, V from conv_output
