@@ -714,7 +714,7 @@ ggml_tensor * llm_build_qwen3next::build_qwen3next_linear_attn_layer(llm_graph_i
     //                                                     conv_output_no_padding->nb[1], conv_output_no_padding->nb[2], conv_output_no_padding->nb[3], 0);
     // cb(conv_output_proper, "conv_output_proper", il);
 
-    conv_output_proper = ggml_transpose(ctx0, conv_output_proper);
+    conv_output_proper = ggml_cont(ctx0, ggml_transpose(ctx0, conv_output_proper));
 
     ggml_tensor * conv_output_silu = ggml_silu(ctx0, conv_output_proper);
     cb(conv_output_silu, "conv_output_silu", il);
