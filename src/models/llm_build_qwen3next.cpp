@@ -715,18 +715,11 @@ ggml_tensor * llm_build_qwen3next::build_qwen3next_linear_attn_layer(llm_graph_i
     // cb(conv_output_proper, "conv_output_proper", il);
 
     conv_output_proper = ggml_transpose(ctx0, conv_output_proper);
-    conv_output_proper = ggml_cont_4d(ctx0, conv_output_proper, qkv_dim, 1, n_seq_tokens, n_seqs);
 
     ggml_tensor * conv_output_silu = ggml_silu(ctx0, conv_output_proper);
     cb(conv_output_silu, "conv_output_silu", il);
 
-    conv_output_proper = ggml_reshape_2d(ctx0, conv_output_silu, n_seq_tokens * n_seqs, qkv_dim);
-    cb(conv_output_proper, "conv_output_final", il);
-
-    ggml_tensor * conv_transposed = ggml_transpose(ctx0, conv_output_proper);
-    cb(conv_transposed, "conv_transposed", il);
-
-    ggml_tensor * conv_qkv_mix = ggml_cont_2d(ctx0, conv_transposed, qkv_dim, n_seq_tokens * n_seqs);
+    ggml_tensor * conv_qkv_mix = ggml_cont_2d(ctx0, conv_output_silu, qkv_dim, n_seq_tokens * n_seqs);
     cb(conv_qkv_mix, "conv_qkv_mix", il);
 
     // Extract the convolved Q, K, V from conv_output
