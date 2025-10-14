@@ -127,8 +127,9 @@ llm_build_qwen3next::llm_build_qwen3next(const llama_model & model, const llm_gr
 }
 
 struct ggml_tensor * llm_build_qwen3next::build_q3n_norm(struct ggml_tensor * input, struct ggml_tensor * weights, int layer) {
-    ggml_tensor * input_norm = ggml_scale_bias(ctx0, weights, 1.0f, 1.0f);
-    return build_norm(input, input_norm, nullptr, LLM_NORM_RMS, layer);
+    // ggml_tensor * input_norm = ggml_scale_bias(ctx0, weights, 1.0f, 1.0f);
+    // EDIT: we moved the shifting part to the conversion, so we just call normal build_norm
+    return build_norm(input, weights, nullptr, LLM_NORM_RMS, layer);
 }
 
 struct ggml_tensor * llm_build_qwen3next::build_q3n_gated_norm(struct ggml_tensor * input, struct ggml_tensor * weights, struct ggml_tensor * gate, int layer) {
