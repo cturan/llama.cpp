@@ -715,6 +715,7 @@ ggml_tensor * llm_build_qwen3next::build_qwen3next_linear_attn_layer(llm_graph_i
     // cb(conv_output_proper, "conv_output_proper", il);
 
     conv_output_proper = ggml_cont(ctx0, ggml_transpose(ctx0, conv_output_proper));
+    cb(conv_output_proper, "conv_output_pre_silu", il);
 
     ggml_tensor * conv_output_silu = ggml_silu(ctx0, conv_output_proper);
     cb(conv_output_silu, "conv_output_silu", il);
@@ -867,7 +868,7 @@ ggml_tensor * llm_build_qwen3next::build_layer_ffn(ggml_tensor * cur, const llam
         cb(cur, "ffn_out", il);
     }
     return cur;
-};
+}
 
 ggml_tensor * llm_build_qwen3next::softplus(ggml_tensor * alpha, ggml_tensor * dt_bias) {
     ggml_tensor * alpha_biased   = ggml_add(ctx0, alpha, dt_bias);                // a + dt_bias
