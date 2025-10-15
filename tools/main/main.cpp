@@ -312,9 +312,12 @@ int main(int argc, char ** argv) {
     std::vector<common_chat_msg> chat_msgs;
 
     // load the model and apply lora adapter, if any
-    // callback_data cb_data;
-    // params.cb_eval = ggml_debug;
-    // params.cb_eval_user_data = &cb_data;
+    if (params.n_predict > 0 && params.n_predict < 50) {
+        // enable debug prints if we print small number of tokens
+        callback_data cb_data;
+        params.cb_eval = ggml_debug;
+        params.cb_eval_user_data = &cb_data;
+    }
     LOG_INF("%s: load the model and apply lora adapter, if any\n", __func__);
     common_init_result llama_init = common_init_from_params(params);
 
