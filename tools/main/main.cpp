@@ -139,7 +139,7 @@ static float ggml_get_float_value(uint8_t * data, ggml_type type, const size_t *
 }
 
 // Function to save a tensor to binary file
-static void save_tensor(struct ggml_tensor* tensor, const char* filename) {
+static void save_tensor(struct ggml_tensor * tensor, uint8_t * data, const char * filename) {
     FILE* f = fopen((std::string("reference/tensors/conv/") + std::string(filename)).c_str(), "wb");
     if (!f) {
         fprintf(stderr, "Failed to create file: %s\n", filename);
@@ -153,13 +153,13 @@ static void save_tensor(struct ggml_tensor* tensor, const char* filename) {
     int64_t total_elements = tensor->ne[0] * tensor->ne[1] * tensor->ne[2] * tensor->ne[3];
     
     // Write data
-    fwrite(tensor->data, sizeof(float), total_elements, f);
+    fwrite(data, sizeof(float), total_elements, f);
     fclose(f);
 }
 
 static void ggml_print_tensor(uint8_t * data, ggml_type type, const int64_t * ne, const size_t * nb, int64_t n) {
     GGML_ASSERT(n > 0);
-    float sum = 0;
+    double sum = 0;
     for (int64_t i3 = 0; i3 < ne[3]; i3++) {
         for (int64_t i2 = 0; i2 < ne[2]; i2++) {
             for (int64_t i1 = 0; i1 < ne[1]; i1++) {
@@ -249,7 +249,7 @@ static bool ggml_debug(struct ggml_tensor * t, bool ask, void * user_data) {
             } else {
                 cb_data->tensors[t->name]++;
             }
-            save_tensor(t, (std::string(t->name) + "_" + std::to_string(cb_data->tensors[t->name]) + ".bin").c_str());
+            save_tensor(t, data, (std::string(t->name) + "_" + std::to_string(cb_data->tensors[t->name]) + ".bin").c_str());
         }
     }
 
