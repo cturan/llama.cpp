@@ -246,6 +246,9 @@ static bool ggml_debug(struct ggml_tensor * t, bool ask, void * user_data) {
         uint8_t * data = is_host ? (uint8_t *) t->data : cb_data->data.data();
         std::string tensor_name(t->name);
         if (std::string(tensor_name).substr(0, std::string("post_moe-").size()) == "post_moe-" || 
+            std::string(tensor_name).substr(0, std::string("k_pad-").size()) == "k_pad-" || 
+            std::string(tensor_name).substr(0, std::string("q_pad-").size()) == "q_pad-" || 
+            std::string(tensor_name).substr(0, std::string("v_pad-").size()) == "v_pad-" || 
             std::string(tensor_name).substr(0, std::string("state_1d-").size()) == "state_1d-") {
                 
             if (cb_data->tensors.count(tensor_name) == 0) {
