@@ -361,8 +361,8 @@ struct ggml_tensor * llm_build_qwen3next::delta_net(
     cb(attn, "attn_in", il);
 
     // We'll be returning the result as a 1D tensor due to the dimensions mismatch of the state and output tensors
-    const int64_t ne[1] = { (S_v * H_v * n_tokens * n_seqs ) + (S_v * S_v * H_v * n_seqs) };
-    struct ggml_tensor * result = ggml_new_tensor(ctx, GGML_TYPE_F32, 1, ne);
+    const int64_t total_dims = (S_v * H_v * n_tokens * n_seqs) + (S_v * S_v * H_v * n_seqs);
+    struct ggml_tensor * result = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, total_dims);
 
     ggml_set_op_params_i32(result, 0, H_v);
     ggml_set_op_params_i32(result, 1, S_k);
@@ -384,7 +384,6 @@ struct ggml_tensor * llm_build_qwen3next::delta_net(
 }
 
 // delta_net_recurrent
-// Recurrent version of delta_net for sequence_length = 1
 struct ggml_tensor * llm_build_qwen3next::delta_net_recurrent(
         struct ggml_context * ctx,
         struct ggml_tensor  * q,
@@ -467,79 +466,33 @@ struct ggml_tensor * llm_build_qwen3next::delta_net_recurrent(
     state = ggml_cont_4d(ctx, state, S_v, S_v, H_k, n_seqs);
     ggml_tensor * g_tokens_exp = ggml_exp(ctx, g_tokens);
 
-    ggml_tensor * final_output = nullptr;
-    ggml_tensor * q_t, * k_t, * v_t, * g_t_exp, * beta_t;
-    for (int i = 0; i < n_tokens; i++) { // this part is per token
-        if (n_tokens == 1) { // don't do unnecessary reshapes / views
-            q_t = q_tokens;
-            k_t = k_tokens;
-            v_t = v_tokens;
-            g_t_exp = g_tokens_exp;
-            beta_t = beta_tokens;
-        } else {
-            q_t = ggml_view_4d(ctx, q_tokens, 1, S_k, H_k, n_seqs, q_tokens->nb[1], q_tokens->nb[2], q_tokens->nb[3], i * ggml_element_size(q_tokens));
-            k_t = ggml_view_4d(ctx, k_tokens, 1, S_k, H_k, n_seqs, k_tokens->nb[1], k_tokens->nb[2], k_tokens->nb[3], i * ggml_element_size(k_tokens));
-            v_t = ggml_view_4d(ctx, v_tokens, 1, S_v, H_k, n_seqs, v_tokens->nb[1], v_tokens->nb[2], v_tokens->nb[3], i * ggml_element_size(v_tokens));
-            g_t_exp = ggml_view_4d(ctx, g_tokens_exp, 1, 1, H_k, n_seqs, g_tokens_exp->nb[1], g_tokens_exp->nb[2], g_tokens_exp->nb[3], i * ggml_element_size(g_tokens_exp));
-            beta_t = ggml_view_4d(ctx, beta_tokens, 1, 1, H_k, n_seqs, beta_tokens->nb[1], beta_tokens->nb[2], beta_tokens->nb[3], i * ggml_element_size(beta_tokens));
-        }
+    // Create result tensor with the same dimensions as delta_net
+    const int64_t total_dims = (S_v * H_v * n_tokens * n_seqs) + (S_v * S_v * H_v * n_seqs);
+    ggml_tensor * result = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, total_dims);
 
-        // Apply gate to state: state = state * exp(g)
-        ggml_tensor * gated_state = ggml_mul(ctx, state, g_t_exp);
-        cb(gated_state, "gated_state", il);
+    cb(q_tokens, "q_tokens", il);
+    cb(k_tokens, "k_tokens", il);
+    cb(v_tokens, "v_tokens", il);
+    cb(g_tokens, "g_tokens", il);
+    cb(beta_tokens, "beta_tokens", il);
+    cb(g_tokens_exp, "g_tokens_exp", il);
+    cb(state, "state_pre", il);
 
-        // Compute kv_memory from state and key
-        // kv_mem = (state * k.unsqueeze(-1)).sum(dim=-2)
-        
-        // Reshape gated_state from [S_v, S_v*H_v, 1, n_seqs] to [S_v, S_v, H_v, n_seqs]
-        // to make it compatible with k_expanded for element-wise multiplication
-        ggml_tensor * gated_state_reshaped = ggml_reshape_4d(ctx, gated_state, S_v, S_v, H_v, n_seqs);
-        cb(gated_state_reshaped, "gated_state_reshaped", il);
-        
-        ggml_tensor * state_k_product = ggml_mul(ctx, gated_state_reshaped, k_t);
-        cb(state_k_product, "state_k_product", il);
+    // Set operation parameters
+    ggml_set_op_params_i32(result, 0, H_v);
+    ggml_set_op_params_i32(result, 1, S_k);
+    ggml_set_op_params_i32(result, 2, S_v);
+    ggml_set_op_params_i32(result, 3, n_tokens); // Pass original n_tokens
 
-        ggml_tensor * kv_memory = ggml_sum_rows(ctx, ggml_cont(ctx, ggml_transpose(ctx, state_k_product)));
-        cb(kv_memory, "kv_memory", il);
-
-        // Compute delta = (v - kv_memory) * beta
-        ggml_tensor * v_diff = ggml_sub(ctx, v_t, kv_memory);
-        ggml_tensor * delta = ggml_mul(ctx, v_diff, beta_t);
-        cb(delta, "delta", il);
-
-        // Update state = state + k * delta
-        // In the reference: last_recurrent_state = last_recurrent_state + k_t.unsqueeze(-1) * delta.unsqueeze(-2)
-        ggml_tensor * delta_t = ggml_transpose(ctx, delta);
-
-        // Will need to broadcast here since GGML doesn't support auto-double-broadcasting on mul
-        ggml_tensor * delta_t_broadcast = ggml_repeat_4d(ctx, delta_t, S_v, S_v, H_v, n_seqs);
-        ggml_tensor * k_t_broadcast  = ggml_repeat_4d(ctx, k_t, S_v, S_v, H_v, n_seqs);
-        ggml_tensor * k_delta_product = ggml_mul(ctx, k_t_broadcast, delta_t_broadcast);
-        cb(k_delta_product, "k_delta", il);
-
-        state = ggml_add(ctx, gated_state_reshaped, k_delta_product);
-        cb(state, "updated_state", il);
-
-        ggml_tensor * state_q_product = ggml_mul(ctx, state, q_t);
-        cb(state_q_product, "state_q_product", il);
-        
-        ggml_tensor * output = ggml_sum_rows(ctx, ggml_cont(ctx, ggml_transpose(ctx, state_q_product)));
-        cb(output, "output", il);
-
-        if (final_output == nullptr) {
-            final_output = output;
-        } else {
-            final_output = ggml_concat(ctx, final_output, output, 0);
-        }
-    }
+    // Set operation and source tensors
+    result->op     = GGML_OP_DELTA_NET_RECURRENT;
+    result->src[0] = q_tokens;
+    result->src[1] = k_tokens;
+    result->src[2] = v_tokens;
+    result->src[3] = g_tokens_exp;
+    result->src[4] = beta_tokens;
+    result->src[5] = state;
     
-    // Concatenate output and updated_state into a single tensor
-    // First, flatten both tensors to 1D
-    ggml_tensor * output_1d = ggml_cont_1d(ctx, final_output, ggml_nelements(final_output));
-    ggml_tensor * updated_state_1d = ggml_cont_1d(ctx, state, ggml_nelements(state));
-    
-    // Concatenate them: [output, updated_state]
-    ggml_tensor * result = ggml_concat(ctx, output_1d, updated_state_1d, 0);
     return result;
 }
 
@@ -604,7 +557,8 @@ ggml_tensor * llm_build_qwen3next::build_qwen3next_linear_attn_layer(llm_graph_i
 
     GGML_ASSERT(ggml_nelements(beta) + ggml_nelements(alpha) == ggml_nelements(mixed_ba));
 
-    ggml_tensor * alpha_softplus = softplus(alpha, model.layers[il].ssm_dt);
+    ggml_tensor * alpha_biased = ggml_add(ctx0, alpha, model.layers[il].ssm_dt);
+    ggml_tensor * alpha_softplus = ggml_softplus(ctx0, alpha_biased);
     cb(alpha_softplus, "a_softplus", il);
     ggml_tensor * gate = ggml_mul(ctx0, alpha_softplus, model.layers[il].ssm_a);  // -A_log.exp() * softplus
     cb(gate, "gate", il);
@@ -870,10 +824,3 @@ ggml_tensor * llm_build_qwen3next::build_layer_ffn(ggml_tensor * cur, const llam
     return cur;
 }
 
-ggml_tensor * llm_build_qwen3next::softplus(ggml_tensor * alpha, ggml_tensor * dt_bias) {
-    ggml_tensor * alpha_biased   = ggml_add(ctx0, alpha, dt_bias);                // a + dt_bias
-    ggml_tensor * alpha_exp      = ggml_exp(ctx0, alpha_biased);                  // exp(a + dt_bias)
-    ggml_tensor * one_plus_exp   = ggml_scale_bias(ctx0, alpha_exp, 1.0f, 1.0f);  // 1 + exp(a + dt_bias)
-    ggml_tensor * alpha_softplus = ggml_log(ctx0, one_plus_exp);                  // log(1 + exp(...))
-    return alpha_softplus;
-}

@@ -1005,6 +1005,7 @@ static const char * GGML_OP_NAME[GGML_OP_COUNT] = {
     "GATED_LINEAR_ATTN",
     "RWKV_WKV7",
     "DELTA_NET",
+    "DELTA_NET_RECURRENT",
 
     "UNARY",
 
@@ -1022,7 +1023,7 @@ static const char * GGML_OP_NAME[GGML_OP_COUNT] = {
     "GLU",
 };
 
-static_assert(GGML_OP_COUNT == 93, "GGML_OP_COUNT != 93");
+static_assert(GGML_OP_COUNT == 94, "GGML_OP_COUNT != 94");
 
 static const char * GGML_OP_SYMBOL[GGML_OP_COUNT] = {
     "none",
@@ -1112,6 +1113,7 @@ static const char * GGML_OP_SYMBOL[GGML_OP_COUNT] = {
     "gated_linear_attn(k, v, q, gate, s)",
     "rwkv_wkv7(r, w, k, v, a, b, s)",
     "delta_net(q, k, v, g, beta, state)",
+    "delta_net_recurrent(q, k, v, g, beta, state)",
 
     "unary(x)",
 
@@ -1129,7 +1131,7 @@ static const char * GGML_OP_SYMBOL[GGML_OP_COUNT] = {
     "glu(x)",
 };
 
-static_assert(GGML_OP_COUNT == 93, "GGML_OP_COUNT != 93");
+static_assert(GGML_OP_COUNT == 94, "GGML_OP_COUNT != 94");
 
 static_assert(GGML_OP_POOL_COUNT == 2, "GGML_OP_POOL_COUNT != 2");
 
@@ -1148,10 +1150,12 @@ static const char * GGML_UNARY_OP_NAME[GGML_UNARY_OP_COUNT] = {
     "HARDSWISH",
     "HARDSIGMOID",
     "EXP",
+    "EXPM1",
+    "SOFTPLUS",
     "GELU_ERF",
 };
 
-static_assert(GGML_UNARY_OP_COUNT == 15, "GGML_UNARY_OP_COUNT != 15");
+static_assert(GGML_UNARY_OP_COUNT == 17, "GGML_UNARY_OP_COUNT != 17");
 
 
 static const char * GGML_GLU_OP_NAME[GGML_GLU_OP_COUNT] = {
@@ -2258,6 +2262,30 @@ struct ggml_tensor * ggml_log_inplace(
         struct ggml_context * ctx,
         struct ggml_tensor  * a) {
     return ggml_log_impl(ctx, a, true);
+}
+
+struct ggml_tensor * ggml_expm1(
+        struct ggml_context * ctx,
+        struct ggml_tensor  * a) {
+    return ggml_unary(ctx, a, GGML_UNARY_OP_EXPM1);
+}
+
+struct ggml_tensor * ggml_expm1_inplace(
+        struct ggml_context * ctx,
+        struct ggml_tensor  * a) {
+    return ggml_unary_inplace(ctx, a, GGML_UNARY_OP_EXPM1);
+}
+
+struct ggml_tensor * ggml_softplus(
+        struct ggml_context * ctx,
+        struct ggml_tensor  * a) {
+    return ggml_unary(ctx, a, GGML_UNARY_OP_SOFTPLUS);
+}
+
+struct ggml_tensor * ggml_softplus_inplace(
+        struct ggml_context * ctx,
+        struct ggml_tensor  * a) {
+    return ggml_unary_inplace(ctx, a, GGML_UNARY_OP_SOFTPLUS);
 }
 
 // ggml_sin
@@ -6402,16 +6430,41 @@ static void ggml_compute_backward(
                         ggml_add_or_set(ctx, cgraph, isrc0, ggml_silu_back(ctx, grad, src0));
                     }
                 } break;
-                case GGML_UNARY_OP_EXP: {
-                    if (src0_needs_grads) {
-                        ggml_add_or_set(ctx, cgraph, isrc0, ggml_mul(ctx, tensor, grad));
+                case GGML_UNARY_OP_EXP:
+                    {
+                        if (src0_needs_grads) {
+                            ggml_add_or_set(ctx, cgraph, isrc0, ggml_mul(ctx, tensor, grad));
+                        }
                     }
-                } break;
-                default: {
-                    fprintf(stderr, "%s: unsupported unary op for backward pass: %s\n",
-                        __func__, ggml_unary_op_name(ggml_get_unary_op(tensor)));
-                    GGML_ABORT("fatal error");
-                } //break;
+                    break;
+                case GGML_UNARY_OP_EXPM1:
+                    {
+                        if (src0_needs_grads) {
+                            ggml_add_or_set(ctx, cgraph, isrc0, ggml_mul(ctx, grad, ggml_exp(ctx, src0)));
+                        }
+                    }
+                    break;
+                case GGML_UNARY_OP_SOFTPLUS:
+                    {
+                        if (src0_needs_grads) {
+                            // gradient of softplus: sigmoid(x) = 1 / (1 + exp(-x))
+                            struct ggml_tensor * neg_src0 = ggml_neg(ctx, src0);
+                            struct ggml_tensor * exp_neg  = ggml_exp(ctx, neg_src0);
+                            struct ggml_tensor * ones =
+                                ggml_exp(ctx, ggml_new_tensor_4d(ctx, src0->type, src0->ne[0], src0->ne[1], src0->ne[2],
+                                                                 src0->ne[3]));
+                            struct ggml_tensor * one_plus_exp = ggml_add(ctx, ones, exp_neg);
+                            struct ggml_tensor * sigmoid      = ggml_div(ctx, ones, one_plus_exp);
+                            ggml_add_or_set(ctx, cgraph, isrc0, ggml_mul(ctx, grad, sigmoid));
+                        }
+                    }
+                    break;
+                default:
+                    {
+                        fprintf(stderr, "%s: unsupported unary op for backward pass: %s\n", __func__,
+                                ggml_unary_op_name(ggml_get_unary_op(tensor)));
+                        GGML_ABORT("fatal error");
+                    }  //break;
             }
         } break;
         case GGML_OP_CROSS_ENTROPY_LOSS: {
