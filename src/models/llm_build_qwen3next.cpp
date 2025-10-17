@@ -279,14 +279,13 @@ struct ggml_tensor * llm_build_qwen3next::delta_net(
     cb(q, "q_postscale", il);
     cb(beta, "beta_sigmoid", il);   
 
-    // Pad first along the token dimension  
-    q = ggml_pad(ctx, q, 0, 0, pad_size, 0); 
-    k = ggml_pad(ctx, k, 0, 0, pad_size, 0);
-    v = ggml_pad(ctx, v, 0, 0, pad_size, 0);
-
     q = ggml_cont(ctx, ggml_permute(ctx, q, 0, 2, 1, 3));
     k = ggml_cont(ctx, ggml_permute(ctx, k, 0, 2, 1, 3));
     v = ggml_cont(ctx, ggml_permute(ctx, v, 0, 2, 1, 3));
+
+    q = ggml_pad(ctx, q, 0, pad_size, 0, 0); 
+    k = ggml_pad(ctx, k, 0, pad_size, 0, 0);
+    v = ggml_pad(ctx, v, 0, pad_size, 0, 0);
     
     beta = ggml_cont(ctx, ggml_permute(ctx, beta, 1, 2, 0, 3));
     cb(beta, "beta_reshape", il);
