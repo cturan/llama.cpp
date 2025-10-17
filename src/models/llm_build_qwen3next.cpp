@@ -279,9 +279,9 @@ struct ggml_tensor * llm_build_qwen3next::delta_net(
     cb(q, "q_postscale", il);
     cb(beta, "beta_sigmoid", il);   
 
-    q = ggml_cont_4d(ctx, ggml_permute(ctx, ggml_reshape_4d(ctx, q, S_v, n_tokens, H_v, n_seqs), 0, 2, 1, 3), S_v, n_tokens, H_v, n_seqs);
-    k = ggml_cont_4d(ctx, ggml_permute(ctx, ggml_reshape_4d(ctx, k, S_v, n_tokens, H_v, n_seqs), 0, 2, 1, 3), S_v, n_tokens, H_v, n_seqs);
-    v = ggml_cont_4d(ctx, ggml_permute(ctx, ggml_reshape_4d(ctx, v, S_v, n_tokens, H_v, n_seqs), 0, 2, 1, 3), S_v, n_tokens, H_v, n_seqs);
+    q = ggml_cont_4d(ctx, ggml_permute(ctx, q, 0, 2, 1, 3), S_v, n_tokens, H_v, n_seqs);
+    k = ggml_cont_4d(ctx, ggml_permute(ctx, k, 0, 2, 1, 3), S_v, n_tokens, H_v, n_seqs);
+    v = ggml_cont_4d(ctx, ggml_permute(ctx, v, 0, 2, 1, 3), S_v, n_tokens, H_v, n_seqs);
 
     q = ggml_pad(ctx, q, 0, pad_size, 0, 0); 
     k = ggml_pad(ctx, k, 0, pad_size, 0, 0);
