@@ -279,9 +279,9 @@ struct ggml_tensor * llm_build_qwen3next::delta_net(
     cb(q, "q_postscale", il);
     cb(beta, "beta_sigmoid", il);   
 
-    q = ggml_cont(ctx, ggml_permute(ctx, q, 0, 2, 1, 3));
-    k = ggml_cont(ctx, ggml_permute(ctx, k, 0, 2, 1, 3));
-    v = ggml_cont(ctx, ggml_permute(ctx, v, 0, 2, 1, 3));
+    q = ggml_cont_4d(ctx, ggml_permute(ctx, ggml_reshape_4d(ctx, q, S_v, n_tokens, H_v, n_seqs), 0, 2, 1, 3), S_v, n_tokens, H_v, n_seqs);
+    k = ggml_cont_4d(ctx, ggml_permute(ctx, ggml_reshape_4d(ctx, k, S_v, n_tokens, H_v, n_seqs), 0, 2, 1, 3), S_v, n_tokens, H_v, n_seqs);
+    v = ggml_cont_4d(ctx, ggml_permute(ctx, ggml_reshape_4d(ctx, v, S_v, n_tokens, H_v, n_seqs), 0, 2, 1, 3), S_v, n_tokens, H_v, n_seqs);
 
     q = ggml_pad(ctx, q, 0, pad_size, 0, 0); 
     k = ggml_pad(ctx, k, 0, pad_size, 0, 0);
@@ -700,12 +700,13 @@ ggml_tensor * llm_build_qwen3next::build_qwen3next_linear_attn_layer(llm_graph_i
         GGML_ASSERT(num_v_heads % num_k_heads == 0);
         int64_t repeat_factor = num_v_heads / num_k_heads;
 
-        ggml_tensor * q_reshaped = ggml_reshape_4d(ctx0, q_conv, head_k_dim, num_k_heads, 1, n_seq_tokens * n_seqs);
-        ggml_tensor * k_reshaped = ggml_reshape_4d(ctx0, k_conv, head_k_dim, num_k_heads, 1, n_seq_tokens * n_seqs);
+        // repeat interleave: reshape to (repeat part, 1, remaining part), do repeat, then reshape back
+        ggml_tensor * q_reshaped = ggml_reshape_3d(ctx0, q_conv, head_k_dim, 1, num_k_heads * n_seq_tokens * n_seqs);
+        ggml_tensor * k_reshaped = ggml_reshape_3d(ctx0, k_conv, head_k_dim, 1, num_k_heads * n_seq_tokens * n_seqs);
         
         // Repeat along the third dimension (the new dimension with size 1)
-        ggml_tensor * q_repeated = ggml_repeat_4d(ctx0, q_reshaped, head_k_dim, num_k_heads, repeat_factor, n_seq_tokens * n_seqs);
-        ggml_tensor * k_repeated = ggml_repeat_4d(ctx0, k_reshaped, head_k_dim, num_k_heads, repeat_factor, n_seq_tokens * n_seqs);
+        ggml_tensor * q_repeated = ggml_repeat_4d(ctx0, q_reshaped, head_k_dim, repeat_factor, num_k_heads * n_seq_tokens * n_seqs, 1);
+        ggml_tensor * k_repeated = ggml_repeat_4d(ctx0, k_reshaped, head_k_dim, repeat_factor, num_k_heads * n_seq_tokens * n_seqs, 1);
         
         // Reshape back to merge the head and repeat dimensions
         // From [head_dim, num_k_heads, repeat_factor, n_seq_tokens * n_seqs]
