@@ -10950,8 +10950,6 @@ void ggml_compute_forward_delta_net_f32(const ggml_compute_params * params, ggml
 
     // Process each chunk with all sequences and heads together
     for (int64_t chunk = 0; chunk < num_chunks; chunk++) {
-        GGML_LOG_INFO("\n=== Processing chunk %ld ===\n", chunk);
-
         // Create lambdas for tensor access similar to recurrent function
         const auto q_chunk = [chunk, src0](int64_t seq, int64_t head, int64_t token_idx, int64_t i) {
             return ggml_get_f32_nd(src0, i, chunk * chunk_size + token_idx, head, seq);
