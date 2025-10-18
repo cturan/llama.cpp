@@ -735,8 +735,11 @@ ggml_tensor * llm_build_qwen3next::build_qwen3next_linear_attn_layer(llm_graph_i
     ggml_tensor * attn_out_1d =
         ggml_view_1d(ctx0, attn_out, output_flat_size, 0);
     cb(attn_out_1d, "attn_out_1d", il);
+
+    ggml_tensor * attn_out_reshaped = ggml_cont_4d(ctx0, attn_out_1d, head_v_dim, n_seq_tokens, num_v_heads, n_seqs);
+    cb(attn_out_1d, "attn_out_reshaped", il);
     
-    ggml_tensor * attn_out_final = ggml_cont(ctx0, ggml_permute(ctx0, ggml_cont_4d(ctx0, attn_out_1d, head_v_dim, n_seq_tokens, num_v_heads, n_seqs), 0, 2, 1, 3));
+    ggml_tensor * attn_out_final = ggml_cont(ctx0, ggml_permute(ctx0, attn_out_reshaped, 0, 2, 1, 3));
     cb(attn_out_final, "attn_out_final", il);
    
     // Extract the state part (second part of the concatenated tensor)

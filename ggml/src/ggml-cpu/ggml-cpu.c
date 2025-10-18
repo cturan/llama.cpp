@@ -2295,6 +2295,7 @@ static int ggml_get_n_tasks(struct ggml_tensor * node, int n_threads) {
         case GGML_OP_POOL_2D:
         case GGML_OP_POOL_2D_BACK:
         case GGML_OP_DELTA_NET_RECURRENT:
+        case GGML_OP_DELTA_NET:
             {
                 n_tasks = 1;
             } break;
@@ -2312,7 +2313,6 @@ static int ggml_get_n_tasks(struct ggml_tensor * node, int n_threads) {
         case GGML_OP_RWKV_WKV6:
         case GGML_OP_GATED_LINEAR_ATTN:
         case GGML_OP_RWKV_WKV7:
-        case GGML_OP_DELTA_NET:
             {
                 n_tasks = n_threads;
             } break;
