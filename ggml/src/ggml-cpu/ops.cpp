@@ -10828,6 +10828,7 @@ static void delta_tensor_add_chunk_f32(const float * a, const float * b, float *
 
 
 static void print_debug_info(float * data, size_t size, const char * name, int64_t token) {
+#ifdef LOGS_OF_DEBUGS
     GGML_LOG_INFO("\nggml-debug: %s (%ld) first 5 values: [%.6f, %.6f, %.6f, %.6f, %.6f, ...]\n", 
         name, token, data[0], data[1], data[2], data[3], data[4]);
     double sum = 0.0;
@@ -10835,6 +10836,7 @@ static void print_debug_info(float * data, size_t size, const char * name, int64
         sum += data[i];
     }
     GGML_LOG_INFO("total elements: %ld, sum = %.10f\n", size, sum);
+#endif
 }
 
 void ggml_compute_forward_delta_net_f32(const ggml_compute_params * params, ggml_tensor * dst) {
@@ -11209,18 +11211,18 @@ void ggml_compute_forward_delta_net_f32(const ggml_compute_params * params, ggml
             }
         }
         print_debug_info(output, S_v * H_v * n_tokens * n_seqs, "output", chunk);
-        GGML_LOG_INFO("\nFull output tensor: \n\n");
-        for (int64_t seq = 0; seq < n_seqs; seq++) {
-            for (int64_t head = 0; head < H_v; head++) {
-                GGML_LOG_INFO("\n[ ");
-                for (int64_t i = 0; i < n_tokens; i++) {
-                    for (int64_t d = 0; d < S_v; d++) {
-                        GGML_LOG_INFO("%.4f  ", output[seq * (n_tokens * S_v * H_v) + head * (n_tokens * S_v) + (chunk * chunk_size + i) * S_v + d]);
-                    }
-                }
-                GGML_LOG_INFO(" ]");
-            }
-        }
+        // GGML_LOG_INFO("\nFull output tensor: \n\n");
+        // for (int64_t seq = 0; seq < n_seqs; seq++) {
+        //     for (int64_t head = 0; head < H_v; head++) {
+        //         GGML_LOG_INFO("\n[ ");
+        //         for (int64_t i = 0; i < n_tokens; i++) {
+        //             for (int64_t d = 0; d < S_v; d++) {
+        //                 GGML_LOG_INFO("%.4f  ", output[seq * (n_tokens * S_v * H_v) + head * (n_tokens * S_v) + (chunk * chunk_size + i) * S_v + d]);
+        //             }
+        //         }
+        //         GGML_LOG_INFO(" ]");
+        //     }
+        // }
         print_debug_info(new_state, S_v * S_v * H_v * n_seqs, "new_state", chunk);
 
         free(temp_state);
