@@ -10957,10 +10957,10 @@ void ggml_compute_forward_delta_net_f32(const ggml_compute_params * params, ggml
     for (int64_t seq = 0; seq < n_seqs; seq++) {
         for (int i = 0; i < num_chunks; i++) {
             for (int64_t head = 0; head < H_v; head++) {
-                delta_compute_k_cumdecay_f32(attn + (chunk_size * chunk_size * H_v) * seq + (chunk_size * chunk_size) * head, 
-                    (float *) src7->data + (chunk_size * S_v * H_v) * seq + (chunk_size * S_v) * head,
-                    g + (chunk_size * H_v) * seq + chunk_size * head,
-                    k_cumdecay + (chunk_size * S_v * H_v) * seq + (chunk_size * S_v) * head,
+                delta_compute_k_cumdecay_f32(attn + (chunk_size * chunk_size * num_chunks * H_v) * seq + (chunk_size * chunk_size) * (head * num_chunks + i), 
+                    (float *) src7->data + (chunk_size * num_chunks * S_v * H_v) * seq + (chunk_size * S_v) * (head * num_chunks + i),
+                    g + (chunk_size * H_v * num_chunks) * seq + chunk_size * (head * num_chunks + i),
+                    k_cumdecay + (chunk_size * num_chunks * S_v * H_v) * seq + (chunk_size * S_v) * (head * num_chunks + i),
                     chunk_size, S_v);
             } 
         }
