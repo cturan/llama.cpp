@@ -605,7 +605,7 @@ ggml_tensor * llm_build_qwen3next::build_qwen3next_linear_attn_layer(llm_graph_i
     ggml_tensor * conv_states_all = mctx_cur->get_r_l(il);
     ggml_tensor * ssm_states_all  = mctx_cur->get_s_l(il);
 
-    bool is_generation = mctx_cur->get_rs_z() < 0;
+    bool use_precomputed_states = n_seq_tokens == 1 && mctx_cur->has_previous_state();
 
     // Build the convolution states tensor
     ggml_tensor * conv_states = build_rs(inp, conv_states_all, hparams.n_embd_r(), n_seqs);
@@ -719,7 +719,7 @@ ggml_tensor * llm_build_qwen3next::build_qwen3next_linear_attn_layer(llm_graph_i
 
     // Choose between delta_net and delta_net_recurrent based on generation mode
     ggml_tensor * attn_out;
-    if (is_generation) {
+    if (use_precomputed_states) {
         // Use delta_net_recurrent for single token generation
         attn_out = delta_net_recurrent(ctx0, q_conv, k_conv, v_conv, gate, beta, state, true, hparams.f_norm_rms_eps, il);
     } else {
