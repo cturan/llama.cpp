@@ -258,7 +258,21 @@ static bool ggml_debug(struct ggml_tensor * t, bool ask, void * user_data) {
             }
             save_tensor(t, data, (tensor_name + "_" + std::to_string(cb_data->tensors[t->name]) + ".bin").c_str());
         }
-        ggml_print_tensor(data, t->type, t->ne, t->nb, 3);
+        ggml_print_tensor(data, t->type, t->ne, t->nb, 4);
+        if (std::string(tensor_name) == std::string("attn_out_reshaped-0")) {
+            LOG("\nFull output tensor: \n[ ");
+            for (int64_t i3 = 0; i3 < t->ne[3]; i3++) {
+                for (int64_t i2 = 0; i2 < t->ne[2]; i2++) {
+                    for (int64_t i1 = 0; i1 < t->ne[1]; i1++) {
+                        for (int64_t i0 = 0; i0 < t->ne[0]; i0++) {
+                            const float v = ggml_get_float_value(data, t->type, t->nb, i0, i1, i2, i3);
+                            LOG("%.4f  ", v);
+                        }
+                    }
+                }
+            }
+            LOG(" ]");
+        }
     }
 
     return true;

@@ -43,84 +43,19 @@ token_counter = {}
 layer_counter = {}
 num_model_layers = 0
 
-def summarize(tensor: torch.Tensor, name: str, max_seq: int = 3, max_vals: int = 3):
+
+def summarize(tensor: torch.Tensor, name: str, max_seq: int = 4):
+    torch.set_printoptions(precision = 6, edgeitems = max_seq, linewidth = 160, sci_mode = False, threshold = 50)
     global num_model_layers, layer_counter, token_counter
     """
     Print a tensor in llama.cpp debug style.
-
-    Supports:
-    - 2D tensors (seq, hidden)
-    - 3D tensors (batch, seq, hidden)
-    - 4D tensors (batch, seq, heads, dim_per_head) via flattening heads × dim_per_head
-    - 5D tensors
-
     Shows first and last max_vals of each vector per sequence position.
     """
     t = tensor.detach().to(torch.float32).cpu()
-    ten_shape = t.shape
-    while t.ndim > 4:
-        t = t.squeeze(0)
 
-    # Determine dimensions
-    if t.ndim == 3:
-        _, s, _ = t.shape
-    elif t.ndim == 2:
-        _, s = 1, t.shape[0]
-        t = t.unsqueeze(0)
-    elif t.ndim == 4:
-        _, s, _, _ = t.shape
-
-    else:
-        print(f"Skipping tensor due to unsupported dimensions: {t.ndim}")
-        return
-
-    print(f"ggml_debug: {name} = (f32)  ... = {{{ten_shape}}}")
-    print("                                     [")
-    print("                                      [")
-
-    # Determine indices for first and last sequences
-    first_indices = list(range(min(s, max_seq)))
-    last_indices = list(range(max(0, s - max_seq), s))
-
-    # Check if there's an overlap between first and last indices or if we're at the edge case of s = 2 * max_seq
-    has_overlap = bool(set(first_indices) & set(last_indices)) or (max_seq * 2 == s)
-
-    # Combine indices
-    if has_overlap:
-        # If there's overlap, just use the combined unique indices
-        indices = sorted(list(set(first_indices + last_indices)))
-        separator_index = None
-    else:
-        # If no overlap, we'll add a separator between first and last sequences
-        indices = first_indices + last_indices
-        separator_index = len(first_indices)
-
-    for i, si in enumerate(indices):
-        # Add separator if needed
-        if separator_index is not None and i == separator_index:
-            print("                                       ...")
-
-        # Extract appropriate slice
-        vec = t[0, si]
-        if vec.ndim == 2:  # 4D case: flatten heads × dim_per_head
-            flat = vec.flatten().tolist()
-        else:  # 2D or 3D case
-            flat = vec.tolist()
-
-        # First and last slices
-        first = flat[:max_vals]
-        last = flat[-max_vals:] if len(flat) >= 2 * max_vals else flat
-        first_str = ", ".join(f"{v:12.4f}" for v in first)
-        last_str = ", ".join(f"{v:12.4f}" for v in last)
-
-        if len(flat) >= 2 * max_vals:
-            print(f"                                       [{first_str}, ..., {last_str}]")
-        else:
-            print(f"                                       [{last_str}]")
-
-    print("                                      ],")
-    print("                                     ]")
-    print(f"                                     sum = {t.sum().item():.6f}\n")
+    print(f"ggml_debug: {name} = (f32)  ... = {{{t.shape}}}\n")
+    print(t)
+    print(f"\n                                     sum = {t.sum().item():.6f}\n")
 
     indexed_patterns = [ r"model\.layers\.[0-9]+_out", r"recurrent_cache_[0-9]+" ]
     non_indexed_patterns = [ r"k_pad", r"v_pad", r"q_scaled" ]
@@ -146,11 +81,41 @@ def summarize(tensor: torch.Tensor, name: str, max_seq: int = 3, max_vals: int =
                 layer_counter[name] = layer_counter[name] + 1  # skip attention layers
         save_tensor(t, f"reference/tensors/org/{name}_{layer_counter[name]}_{token_counter[name]}.bin")
 
-from transformers.models.qwen3_next.modeling_qwen3_next import torch_causal_conv1d_update, apply_rotary_pos_emb, l2norm  # noqa: E402
+from transformers.models.qwen3_next.modeling_qwen3_next import torch_causal_conv1d_update, apply_rotary_pos_emb, l2norm, repeat_kv  # noqa: E402
+from transformers.processing_utils import Unpack # noqa: E402
+from transformers.utils.generic import TransformersKwargs # noqa: E402
 orig_conv1d_update = torch_causal_conv1d_update
 orig_rope = apply_rotary_pos_emb
 import torch.nn.functional as F  # noqa: E402
 import typing  # noqa: E402
+from torch import nn # noqa: E402
+
+def patched_eager_attention_forward(
+    module: nn.Module,
+    query: torch.Tensor,
+    key: torch.Tensor,
+    value: torch.Tensor,
+    attention_mask: typing.Optional[torch.Tensor],
+    scaling: float,
+    dropout: float = 0.0,
+    **kwargs: Unpack[TransformersKwargs],
+):
+    print(f"\nAttention scaling: {scaling}\n")
+    key_states = repeat_kv(key, module.num_key_value_groups)
+    value_states = repeat_kv(value, module.num_key_value_groups)
+
+    attn_weights = torch.matmul(query, key_states.transpose(2, 3)) * scaling
+    if attention_mask is not None:
+        causal_mask = attention_mask[:, :, :, : key_states.shape[-2]]
+        attn_weights = attn_weights + causal_mask
+
+    attn_weights = nn.functional.softmax(attn_weights, dim=-1, dtype=torch.float32).to(query.dtype)
+    attn_weights = nn.functional.dropout(attn_weights, p=dropout, training=module.training)
+    attn_output = torch.matmul(attn_weights, value_states)
+    attn_output = attn_output.transpose(1, 2).contiguous()
+    summarize(attn_output, "attn_output")
+
+    return attn_output, attn_weights
 
 def patched_torch_causal_conv1d_update(
     hidden_states,
@@ -343,7 +308,13 @@ def patched_torch_chunk_gated_delta_rule(
         summarize(k_i, f"k_i_chunk_{i}")
         summarize(v_i, f"v_i_chunk_{i}")
 
-        attn = (q_i @ k_i.transpose(-1, -2) * decay_mask[:, :, i]).masked_fill_(mask, 0)
+        q_k_trans = q_i @ k_i.transpose(-1, -2)
+        summarize(q_k_trans, f"q_k_trans_{i}")
+
+        q_k_trans_decay = q_k_trans * decay_mask[:, :, i]
+        summarize(q_k_trans_decay, f"q_k_trans_decay_{i}")
+
+        attn = q_k_trans_decay.masked_fill_(mask, 0)
         summarize(attn, f"attn_chunk_{i}")
 
         v_prime = (k_cumdecay[:, :, i]) @ last_recurrent_state
@@ -362,16 +333,31 @@ def patched_torch_chunk_gated_delta_rule(
         summarize(g_last, f"g_last_chunk_{i}")
 
         g_diff_exp = (g[:, :, i, -1, None] - g[:, :, i]).exp()
-        last_recurrent_state = (
-            last_recurrent_state * g_last
-            + (k_i * g_diff_exp[..., None]).transpose(-1, -2) @ v_new
-        )
+        summarize(g_diff_exp, f"g_diff_exp_chunk_{i}")
+
+        state_g_last = last_recurrent_state * g_last
+        summarize(state_g_last, f"state_g_last_{i}")
+
+        k_g_diffexp = (k_i * g_diff_exp[..., None])
+        summarize(k_g_diffexp, f"k_g_diffexp_{i}")
+        
+        k_g_diffexp_T = k_g_diffexp.transpose(-1, -2)
+        summarize(k_g_diffexp, f"k_g_diffexp_T_{i}")
+
+        kgd_mul_vnew = k_g_diffexp_T @ v_new
+        summarize(kgd_mul_vnew, f"kgd_mul_vnew_{i}")
+
+        last_recurrent_state = state_g_last + kgd_mul_vnew
         summarize(last_recurrent_state, f"updated_state_chunk_{i}")
 
     if not output_final_state:
         last_recurrent_state = None
     core_attn_out = core_attn_out.reshape(core_attn_out.shape[0], core_attn_out.shape[1], -1, core_attn_out.shape[-1])
+    summarize(core_attn_out, "attn_out_reshaped")
+
     core_attn_out = core_attn_out[:, :, :num_heads]
+    summarize(core_attn_out, "attn_out_truncated")
+
     core_attn_out = core_attn_out.transpose(1, 2).contiguous().to(initial_dtype)
     summarize(core_attn_out, "attn_out")
 
@@ -451,6 +437,7 @@ qwen_mod.torch_chunk_gated_delta_rule = patched_torch_chunk_gated_delta_rule
 qwen_mod.torch_causal_conv1d_update = patched_torch_causal_conv1d_update
 qwen_mod.apply_rotary_pos_emb = patched_apply_rope
 qwen_mod.torch_recurrent_gated_delta_rule = patched_torch_recurrent_gated_delta_rule
+qwen_mod.eager_attention_forward = patched_eager_attention_forward
 
 # Store original functions for patching
 original_functions = {}
@@ -735,6 +722,8 @@ data_dir.mkdir(exist_ok=True)
 # Store all generated tokens and logits
 all_generated_tokens = []
 all_logits = []
+
+model.config._attn_implementation = "eager"
 
 with torch.no_grad():
     # Initial forward pass

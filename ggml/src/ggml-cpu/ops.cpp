@@ -11406,7 +11406,7 @@ void ggml_compute_forward_delta_net_recurrent_f32(const ggml_compute_params * pa
                         *(state_ptr(seq, head, i, j)) = temp_state[state_idx];
                         
                         // Store the final state for this head and sequence (for output)
-                        int64_t final_state_idx = i + j * S_v + head * (S_v * S_v) + seq * (S_v * S_v * H_v);
+                        int64_t final_state_idx = j + i * S_v + head * (S_v * S_v) + seq * (S_v * S_v * H_v);
                         final_state[final_state_idx] = temp_state[state_idx];
                     }
                 }
