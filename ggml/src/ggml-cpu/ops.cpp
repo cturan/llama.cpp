@@ -10634,9 +10634,9 @@ static void delta_compute_value_f32(const float * attn,
         for (int i = 0; i < num_chunks; i++) {
             for (int64_t head = 0; head < n_heads; head++) {
                 delta_matmul_f32(
-                    attn + (chunk_size * chunk_size * n_heads) * seq + (chunk_size * chunk_size) * (head * num_chunks + i), 
-                    v_beta + (chunk_size * v_head_dim * n_heads) * seq + (chunk_size * v_head_dim) * head, 
-                    value + (chunk_size * v_head_dim * n_heads) * seq + (chunk_size * v_head_dim) * head, 
+                    attn + (chunk_size * chunk_size * n_heads * num_chunks) * seq + (chunk_size * chunk_size) * (head * num_chunks + i), 
+                    v_beta + (chunk_size * v_head_dim * n_heads * num_chunks) * seq + (chunk_size * v_head_dim) * (head * num_chunks + i), 
+                    value + (chunk_size * v_head_dim * n_heads * num_chunks) * seq + (chunk_size * v_head_dim) * (head * num_chunks + i), 
                     chunk_size, v_head_dim, chunk_size);
             }
         }
@@ -10844,7 +10844,6 @@ static void delta_tensor_add_chunk_f32(const float * a, const float * b, float *
 
 
 static void print_debug_info(float * data, size_t size, const char * name, int64_t token) {
-#ifdef LOGS_OF_DEBUGS
     GGML_LOG_INFO("\nggml-debug: %s (%ld) first 5 values: [%.6f, %.6f, %.6f, %.6f, %.6f, ...]\n", 
         name, token, data[0], data[1], data[2], data[3], data[4]);
     double sum = 0.0;
@@ -10852,7 +10851,6 @@ static void print_debug_info(float * data, size_t size, const char * name, int64
         sum += data[i];
     }
     GGML_LOG_INFO("total elements: %ld, sum = %.10f\n", size, sum);
-#endif
 }
 
 // chunked version of delta_net (for prompt processing)
@@ -10955,9 +10953,12 @@ void ggml_compute_forward_delta_net_f32(const ggml_compute_params * params, ggml
     // attn = attn + torch.eye(chunk_size)
     delta_apply_triangular_updates_chunk_f32(attn, chunk_size, n_seqs, H_v, num_chunks);
     delta_add_identity_matrix_chunk_f32(attn, chunk_size, n_seqs, H_v, num_chunks);
+    print_debug_info(attn, chunk_size * chunk_size * H_v * num_chunks * n_seqs, "attn_eye", -1);
 
     // Compute value = attn @ v_beta
     delta_compute_value_f32(attn, (const float *) src6->data, value, chunk_size, S_v, H_v, n_seqs, num_chunks);
+    print_debug_info(value, chunk_size * S_v * H_v * num_chunks * n_seqs, "value", -1);
+
     for (int64_t seq = 0; seq < n_seqs; seq++) {
         for (int i = 0; i < num_chunks; i++) {
             for (int64_t head = 0; head < H_v; head++) {
@@ -11069,7 +11070,7 @@ void ggml_compute_forward_delta_net_f32(const ggml_compute_params * params, ggml
             }
         }
         
-        print_debug_info(attn, chunk_size * chunk_size * H_v * num_chunks * n_seqs, "attn_step4_new_chunk", chunk);
+        print_debug_info(attn, chunk_size * chunk_size * H_v * n_seqs, "attn_step4_new_chunk", chunk);
 
         // v_prime = (k_cumdecay[:, :, i]) @ last_recurrent_state
         // k_cumdecay has shape [chunk_size, v_head_dim], state has shape [v_head_dim, v_head_dim]
