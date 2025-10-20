@@ -10844,6 +10844,7 @@ static void delta_tensor_add_chunk_f32(const float * a, const float * b, float *
 
 
 static void print_debug_info(float * data, size_t size, const char * name, int64_t token) {
+#ifdef CHUNKY_DEBUG
     GGML_LOG_INFO("\nggml-debug: %s (%ld) first 5 values: [%.6f, %.6f, %.6f, %.6f, %.6f, ...]\n", 
         name, token, data[0], data[1], data[2], data[3], data[4]);
     double sum = 0.0;
@@ -10851,6 +10852,7 @@ static void print_debug_info(float * data, size_t size, const char * name, int64
         sum += data[i];
     }
     GGML_LOG_INFO("total elements: %ld, sum = %.10f\n", size, sum);
+#endif
 }
 
 // chunked version of delta_net (for prompt processing)
