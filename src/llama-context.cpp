@@ -1497,6 +1497,57 @@ llm_graph_cb llama_context::graph_get_cb() const {
                 }
             }
         }
+
+        // Ensure key Qwen3 Next ops are assigned to the layer device even for single-token generation
+        if (il != -1) {
+            const auto & dev_layer = model.dev_layer(il);
+            switch (cur->op) {
+                case GGML_OP_CUMSUM:
+                case GGML_OP_DELTA_NET:
+                case GGML_OP_DELTA_NET_RECURRENT: {
+                    for (const auto & backend : backends) {
+                        if (ggml_backend_get_device(backend.get()) == dev_layer) {
+                            if (ggml_backend_supports_op(backend.get(), cur)) {
+                                ggml_backend_sched_set_tensor_backend(sched.get(), cur, backend.get());
+                            }
+                        }
+                    }
+                } break;
+                // Heavily used small-batch ops during generation: pin to layer device when supported
+                case GGML_OP_UNARY:
+                case GGML_OP_ADD:
+                case GGML_OP_SUB:
+                case GGML_OP_MUL:
+                case GGML_OP_DIV:
+                case GGML_OP_SCALE:
+                case GGML_OP_SQR:
+                case GGML_OP_SQRT:
+                case GGML_OP_CLAMP:
+                case GGML_OP_ROPE:
+                case GGML_OP_ROPE_BACK:
+                case GGML_OP_RMS_NORM:
+                case GGML_OP_NORM:
+                case GGML_OP_CPY:
+                case GGML_OP_DUP:
+                case GGML_OP_REPEAT:
+                case GGML_OP_GET_ROWS:
+                case GGML_OP_SET_ROWS:
+                case GGML_OP_MEAN:
+                case GGML_OP_SUM:
+                case GGML_OP_SUM_ROWS:
+                case GGML_OP_DIAG_MASK_INF:
+                case GGML_OP_TRI: {
+                    for (const auto & backend : backends) {
+                        if (ggml_backend_get_device(backend.get()) == dev_layer) {
+                            if (ggml_backend_supports_op(backend.get(), cur)) {
+                                ggml_backend_sched_set_tensor_backend(sched.get(), cur, backend.get());
+                            }
+                        }
+                    }
+                } break;
+                default: break;
+            }
+        }
     };
 }
 

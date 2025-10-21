@@ -3628,7 +3628,10 @@ static bool ggml_backend_cuda_device_supports_op(ggml_backend_dev_t dev, const g
         case GGML_OP_DELTA_NET_RECURRENT:
             return true;
         case GGML_OP_DELTA_NET:
-            return true;  // Chunked version not implemented yet, use CPU
+            return true;
+        case GGML_OP_CUMSUM:
+            // require contiguous input on src0
+            return op->src[0] != NULL && ggml_is_contiguous(op->src[0]);
         case GGML_OP_FLASH_ATTN_EXT:
             return ggml_cuda_flash_attn_ext_supported(dev_ctx->device, op);
         case GGML_OP_CROSS_ENTROPY_LOSS:
@@ -3664,6 +3667,16 @@ static int64_t get_op_batch_size(const ggml_tensor * op) {
 
 static bool ggml_backend_cuda_device_offload_op(ggml_backend_dev_t dev, const ggml_tensor * op) {
     const int min_batch_size = 32;
+
+    // Always offload key ops even for small batch sizes during generation
+    switch (op->op) {
+        case GGML_OP_DELTA_NET:
+        case GGML_OP_DELTA_NET_RECURRENT:
+        case GGML_OP_CUMSUM:
+            return true;
+        default:
+            break;
+    }
 
     return get_op_batch_size(op) >= min_batch_size;
 

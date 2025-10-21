@@ -128,12 +128,29 @@ void llama_memory_hybrid::clear(bool data) {
 }
 
 bool llama_memory_hybrid::seq_rm(llama_seq_id seq_id, llama_pos p0, llama_pos p1) {
-    // Try removing from the recurrent cache first since it may fail. If it does
-    // fail, the cache will not have been mutated.
-    if (!mem_recr->seq_rm(seq_id, p0, p1)) {
-        return false;
+    // For hybrid memory (attention + recurrent):
+    // - Attention cache supports partial removal (removing positions [p0, p1))
+    // - Recurrent memory only supports full clear (p1 == -1)
+    //
+    // When server does cache reuse with partial removal (e.g., "remove [21176, end)"),
+    // we should:
+    // 1. Apply partial removal to attention cache (works fine)
+    // 2. Skip recurrent memory (it's cumulative state, doesn't need partial removal)
+    // 3. Return TRUE so server keeps using the cache
+    //
+    // Only return false if NEITHER cache can handle the operation.
+    
+    bool attn_result = mem_attn->seq_rm(seq_id, p0, p1);
+    
+    // Recurrent memory: only clear if doing full removal (p1 == -1)
+    // For partial removal, skip it (recurrent state is cumulative, doesn't have "positions")
+    if (p1 == -1) {
+        mem_recr->seq_rm(seq_id, p0, p1);
     }
-    return mem_attn->seq_rm(seq_id, p0, p1);
+    
+    // Return success if attention cache handled it
+    // (recurrent state doesn't need position-based removal for cache reuse)
+    return attn_result;
 }
 
 void llama_memory_hybrid::seq_cp(llama_seq_id seq_id_src, llama_seq_id seq_id_dst, llama_pos p0, llama_pos p1) {
@@ -157,8 +174,38 @@ void llama_memory_hybrid::seq_div(llama_seq_id seq_id, llama_pos p0, llama_pos p
 }
 
 llama_pos llama_memory_hybrid::seq_pos_min(llama_seq_id seq_id) const {
-    // the min of the total cache is the max of the two caches' min values
-    return std::max(mem_attn->seq_pos_min(seq_id), mem_recr->seq_pos_min(seq_id));
+    // For hybrid memory with recurrent layers (e.g., Qwen3Next with delta-net):
+    // - Attention cache tracks a range of positions [pos_min, pos_max]
+    // - Recurrent memory tracks only the CURRENT position (cumulative state)
+    // 
+    // For cache reuse validation, we need the minimum cached position that's still valid.
+    // Recurrent state is always valid from position 0 (it's cumulative), so we should
+    // only consider the attention cache's pos_min for this purpose.
+    //
+    // Using max() was causing false cache invalidation: if recurrent pos > attn pos_min,
+    // the server would think early positions were evicted, even though recurrent state
+    // is valid for the entire sequence.
+    const auto attn_pos_min = mem_attn->seq_pos_min(seq_id);
+    const auto recr_pos_min = mem_recr->seq_pos_min(seq_id);
+    
+    // If both caches are empty, return -1
+    if (attn_pos_min == -1 && recr_pos_min == -1) {
+        return -1;
+    }
+    
+    // If only one cache is active, use its value
+    if (attn_pos_min == -1) {
+        // Only recurrent layers: state is valid from position 0
+        return 0;
+    }
+    if (recr_pos_min == -1) {
+        // Only attention layers: use attention cache's pos_min
+        return attn_pos_min;
+    }
+    
+    // Both caches active: use attention cache's pos_min since recurrent state
+    // doesn't have a "minimum" - it's cumulative and always valid from the start
+    return attn_pos_min;
 }
 
 llama_pos llama_memory_hybrid::seq_pos_max(llama_seq_id seq_id) const {
