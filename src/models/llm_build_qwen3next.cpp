@@ -319,10 +319,10 @@ struct ggml_tensor * llm_build_qwen3next::delta_net(
     k_beta = ggml_reshape_4d(ctx, k_beta, S_v, GGML_DELTA_NET_CHUNK, H_k * num_chunks, n_seqs);
     cb(k_beta, "k_beta", il);
     k = ggml_reshape_4d(ctx, k, S_v, GGML_DELTA_NET_CHUNK, H_k * num_chunks, n_seqs);
-    cb(k_beta, "k_reshape", il);
+    cb(k, "k_reshape", il);
     q = ggml_reshape_4d(ctx, q, S_v, GGML_DELTA_NET_CHUNK, H_k * num_chunks, n_seqs);
     cb(q, "q_reshape", il);
-    v = ggml_reshape_4d(ctx, q, S_v, GGML_DELTA_NET_CHUNK, H_v * num_chunks, n_seqs);
+    v = ggml_reshape_4d(ctx, v, S_v, GGML_DELTA_NET_CHUNK, H_v * num_chunks, n_seqs);
     cb(v, "v_reshape", il);
     g = ggml_reshape_4d(ctx, g, GGML_DELTA_NET_CHUNK, 1, H_k * num_chunks, n_seqs);
     cb(g, "g_reshape", il);
