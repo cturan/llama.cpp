@@ -579,6 +579,21 @@ common_chat_templates_ptr common_chat_templates_init(
             "{%- if false %}");
     }
 
+    // Fix MiniMax-M2 template bug: reasoning_content should be rendered for ALL assistant messages, not just after last user
+    // Original template has: {%- if reasoning_content and loop.index0 > ns.last_user_index -%}
+    // This causes reasoning from history to be lost, breaking interleaved thinking performance
+    // TODO remove this once the template is fixed, I just don't have server to upload gguf's yet.
+    if (default_template_src.find("]~!b[") != std::string::npos 
+            && default_template_src.find("]~b]") != std::string::npos
+            && default_template_src.find("loop.index0 > ns.last_user_index") != std::string::npos) {
+        LOG_INF("Detected MiniMax-M2 template with reasoning_content bug, applying automatic fix...\n");
+        // Remove the condition that prevents rendering reasoning_content for historical messages
+        string_replace_all(default_template_src,
+            "{%- if reasoning_content and loop.index0 > ns.last_user_index -%}",
+            "{%- if reasoning_content -%}");
+        LOG_INF("MiniMax-M2 template fixed: reasoning_content will now be preserved in conversation history\n");
+    }
+
     std::string token_bos = bos_token_override;
     std::string token_eos = eos_token_override;
     bool add_bos = false;
@@ -640,6 +655,7 @@ const char * common_chat_format_name(common_chat_format format) {
         case COMMON_CHAT_FORMAT_SEED_OSS: return "Seed-OSS";
         case COMMON_CHAT_FORMAT_NEMOTRON_V2: return "Nemotron V2";
         case COMMON_CHAT_FORMAT_APERTUS: return "Apertus";
+        case COMMON_CHAT_FORMAT_MINIMAX_M2: return "MiniMax-M2";
         default:
             throw std::runtime_error("Unknown chat format");
     }
@@ -1603,6 +1619,33 @@ static common_chat_params common_chat_params_init_deepseek_v3_1(const common_cha
     return data;
 }
 
+static common_chat_params common_chat_params_init_minimax_m2(const common_chat_template & tmpl, const struct templates_params & params) {
+    common_chat_params data;
+    data.prompt = apply(tmpl, params);
+    data.format = COMMON_CHAT_FORMAT_MINIMAX_M2;
+    
+    // Handle thinking tags based on prompt ending
+    if (string_ends_with(data.prompt, "<think>\n")) {
+        if (!params.enable_thinking) {
+            // Close the thinking tag immediately if thinking is disabled
+            data.prompt += "</think>\n\n";
+        } else {
+            // Mark thinking as forced open (template started with <think>)
+            data.thinking_forced_open = true;
+        }
+    }
+    
+    // Preserve MiniMax-M2 special tokens
+    data.preserved_tokens = {
+        "<think>",
+        "</think>",
+        "<minimax:tool_call>",
+        "</minimax:tool_call>",
+    };
+    
+    return data;
+}
+
 static void common_chat_parse_deepseek_r1(common_chat_msg_parser & builder) {
     builder.try_parse_reasoning("<think>", "</think>");
     if (!builder.syntax().parse_tool_calls) {
@@ -1622,6 +1665,60 @@ static void common_chat_parse_deepseek_r1(common_chat_msg_parser & builder) {
         function_regex,
         close_regex,
         tool_calls_end);
+}
+
+static void common_chat_parse_minimax_m2(common_chat_msg_parser & builder) {
+    // MiniMax-M2 uses <think>...</think> tags for reasoning content
+    builder.try_parse_reasoning("<think>", "</think>");
+    
+    if (!builder.syntax().parse_tool_calls) {
+        builder.add_content(builder.consume_rest());
+        return;
+    }
+
+    // MiniMax-M2 uses <minimax:tool_call>...</minimax:tool_call> for tool calls
+    // Format: <invoke name="tool-name"><parameter name="key">value</parameter>...</invoke>
+    static const common_regex tool_call_begin_regex(regex_escape("<minimax:tool_call>"));
+    static const common_regex tool_call_end_regex(regex_escape("</minimax:tool_call>"));
+    static const common_regex invoke_begin_regex(regex_escape("<invoke name=\"") + "([^\"]+)" + regex_escape("\">"));
+    static const common_regex invoke_end_regex(regex_escape("</invoke>"));
+    static const common_regex param_regex(regex_escape("<parameter name=\"") + "([^\"]+)" + regex_escape("\">") + "([\\s\\S]*?)" + regex_escape("</parameter>"));
+    
+    if (builder.try_consume_regex(tool_call_begin_regex)) {
+        const auto & input = builder.input();
+        // Parse multiple <invoke> blocks within tool_call
+        while (auto invoke_match = builder.try_consume_regex(invoke_begin_regex)) {
+            auto & tool_name_range = invoke_match->groups[1];
+            std::string tool_name = input.substr(tool_name_range.begin, tool_name_range.end - tool_name_range.begin);
+            json arguments = json::object();
+            
+            // Parse parameters until </invoke>
+            while (!builder.try_consume_regex(invoke_end_regex)) {
+                if (auto param_match = builder.try_consume_regex(param_regex)) {
+                    auto & param_name_range = param_match->groups[1];
+                    auto & param_value_range = param_match->groups[2];
+                    std::string param_name = input.substr(param_name_range.begin, param_name_range.end - param_name_range.begin);
+                    std::string param_value = input.substr(param_value_range.begin, param_value_range.end - param_value_range.begin);
+                    
+                    // Try to parse as JSON, fallback to string
+                    try {
+                        arguments[param_name] = json::parse(param_value);
+                    } catch (...) {
+                        arguments[param_name] = param_value;
+                    }
+                } else {
+                    // If no more params, expect </invoke>
+                    break;
+                }
+            }
+            
+            builder.add_tool_call(tool_name, "", arguments.dump());
+        }
+        builder.consume_regex(tool_call_end_regex);
+    } else {
+        // No tool calls, just regular content
+        builder.add_content(builder.consume_rest());
+    }
 }
 
 static void common_chat_parse_deepseek_v3_1_content(common_chat_msg_parser & builder) {
@@ -2748,6 +2845,11 @@ static common_chat_params common_chat_templates_apply_jinja(
         return common_chat_params_init_apertus(tmpl, params);
     }
 
+    // MiniMax-M2 format detection
+    if (src.find("]~!b[") != std::string::npos && src.find("]~b]") != std::string::npos) {
+        return common_chat_params_init_minimax_m2(tmpl, params);
+    }
+
     // Use generic handler when mixing tools + JSON schema.
     // TODO: support that mix in handlers below.
     if ((params.tools.is_array() && params.json_schema.is_object())) {
@@ -2925,6 +3027,9 @@ static void common_chat_parse(common_chat_msg_parser & builder) {
             break;
         case COMMON_CHAT_FORMAT_APERTUS:
             common_chat_parse_apertus(builder);
+            break;
+        case COMMON_CHAT_FORMAT_MINIMAX_M2:
+            common_chat_parse_minimax_m2(builder);
             break;
         default:
             throw std::runtime_error(std::string("Unsupported format: ") + common_chat_format_name(builder.syntax().format));

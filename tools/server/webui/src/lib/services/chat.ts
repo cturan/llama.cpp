@@ -114,10 +114,23 @@ export class ChatService {
 		const processedMessages = this.injectSystemMessage(normalizedMessages);
 
 		const requestBody: ApiChatCompletionRequest = {
-			messages: processedMessages.map((msg: ApiChatMessageData) => ({
-				role: msg.role,
-				content: msg.content
-			})),
+			messages: processedMessages.map((msg: ApiChatMessageData) => {
+				const apiMsg: {
+					role: ChatRole;
+					content: string | ApiChatMessageContentPart[];
+					reasoning_content?: string;
+				} = {
+					role: msg.role,
+					content: msg.content
+				};
+				
+				// Include reasoning_content if present (for interleaved thinking models like MiniMax-M2)
+				if (msg.reasoning_content) {
+					apiMsg.reasoning_content = msg.reasoning_content;
+				}
+				
+				return apiMsg;
+			}),
 			stream
 		};
 
@@ -449,10 +462,17 @@ export class ChatService {
 		message: DatabaseMessage & { extra?: DatabaseMessageExtra[] }
 	): ApiChatMessageData {
 		if (!message.extra || message.extra.length === 0) {
-			return {
+			const result: ApiChatMessageData = {
 				role: message.role as 'user' | 'assistant' | 'system',
 				content: message.content
 			};
+			
+			// Preserve reasoning content (thinking) for interleaved thinking models
+			if (message.thinking) {
+				result.reasoning_content = message.thinking;
+			}
+			
+			return result;
 		}
 
 		const contentParts: ApiChatMessageContentPart[] = [];
@@ -537,10 +557,17 @@ export class ChatService {
 			}
 		}
 
-		return {
+		const result: ApiChatMessageData = {
 			role: message.role as 'user' | 'assistant' | 'system',
 			content: contentParts
 		};
+		
+		// Preserve reasoning content (thinking) for interleaved thinking models
+		if (message.thinking) {
+			result.reasoning_content = message.thinking;
+		}
+		
+		return result;
 	}
 
 	/**

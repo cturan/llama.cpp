@@ -928,6 +928,9 @@ class TextModel(ModelBase):
         if chkhsh == "3ce83efda5659b07b1ad37ca97ca5797ea4285d9b9ab0dc679e4a720c9da7454":
             # ref: https://huggingface.co/openai-community/gpt2
             res = "gpt-2"
+        if chkhsh == "f4f37b6c8eb9ea29b3eac6bb8c8487c5ab7885f8d8022e67edc1c68ce8403e95":
+            # ref: MiniMax M2 (GPT2Tokenizer) – recognize as GPT-2 BPE pre-tokenizer
+            res = "gpt-2"
         if chkhsh == "32d85c31273f8019248f2559fed492d929ea28b17e51d81d3bb36fff23ca72b3":
             # ref: https://huggingface.co/stabilityai/stablelm-2-zephyr-1_6b
             res = "stablelm2"
@@ -4028,6 +4031,144 @@ class GPT2Model(TextModel):
 
         return tensors
 
+
+@ModelBase.register("MiniMaxM2ForCausalLM", "MiniMaxM2MiniForCausalLM")
+class MiniMaxM2Model(TextModel):
+    model_arch = gguf.MODEL_ARCH.MINIMAX_M2
+
+    _experts: list[dict[str, Tensor]] | None = None
+
+    def set_vocab(self):
+        # Try SentencePiece, then Llama-HF, then GPT2 (merges+vocab)
+        try:
+            self._set_vocab_sentencepiece()
+        except FileNotFoundError:
+            try:
+                self._set_vocab_llama_hf()
+            except FileNotFoundError:
+                self._set_vocab_gpt2()
+
+        tokenizer_config_file = self.dir_model / "tokenizer_config.json"
+        if tokenizer_config_file.is_file():
+            with open(tokenizer_config_file, "r", encoding="utf-8") as f:
+                tokenizer_config_json = json.load(f)
+                if "add_prefix_space" in tokenizer_config_json:
+                    self.gguf_writer.add_add_space_prefix(tokenizer_config_json["add_prefix_space"])
+
+    def set_gguf_parameters(self):
+        hparams = self.hparams
+
+        block_count = hparams["num_hidden_layers"]
+        n_embd = hparams["hidden_size"]
+        n_head = hparams["num_attention_heads"]
+        n_head_kv = hparams["num_key_value_heads"]
+        
+        # MiniMax M2 uses partial RoPE: head_dim=128 but only rotary_dim=64 gets RoPE applied
+        rope_dim = hparams.get("rotary_dim", n_embd // n_head)
+
+        # MiniMax M2 expert FFN uses intermediate_size (1536), NOT mlp_intermediate_size (8192)
+        # mlp_intermediate_size in config.json is misleading/unused
+        n_ff = hparams.get("intermediate_size", 8192)
+
+        self.gguf_writer.add_block_count(block_count)
+        self.gguf_writer.add_context_length(hparams["max_position_embeddings"])
+        self.gguf_writer.add_embedding_length(n_embd)
+        self.gguf_writer.add_feed_forward_length(n_ff)
+        self.gguf_writer.add_head_count(n_head)
+        self.gguf_writer.add_head_count_kv(n_head_kv)
+        self.gguf_writer.add_layer_norm_rms_eps(hparams["rms_norm_eps"])
+        self.gguf_writer.add_rope_dimension_count(rope_dim)
+        self.gguf_writer.add_rope_freq_base(hparams.get("rope_theta", 10000.0))
+        self.gguf_writer.add_file_type(self.ftype)
+
+        if hparams.get("num_local_experts", 0) > 0:
+            self.gguf_writer.add_expert_count(hparams["num_local_experts"])
+            self.gguf_writer.add_expert_used_count(hparams["num_experts_per_tok"])
+            self.gguf_writer.add_expert_feed_forward_length(n_ff)
+            self.gguf_writer.add_expert_gating_func(gguf.ExpertGatingFuncType.SIGMOID)
+
+        if hparams.get("use_qk_norm", False):
+            self.gguf_writer.add_bool(gguf.Keys.Attention.QK_NORM.format(arch=self.gguf_writer.arch), True)
+        if (eps := hparams.get("attention_qk_norm_eps")) is not None:
+            self.gguf_writer.add_float32(gguf.Keys.Attention.QK_NORM_EPS.format(arch=self.gguf_writer.arch), eps)
+        
+        # Set head dimensions explicitly (critical for GQA models with head_dim != n_embd/n_head)
+        head_dim = hparams.get("head_dim", hparams["hidden_size"] // hparams["num_attention_heads"])
+        self.gguf_writer.add_uint32(gguf.Keys.Attention.KEY_LENGTH.format(arch=self.gguf_writer.arch), head_dim)
+        self.gguf_writer.add_uint32(gguf.Keys.Attention.VALUE_LENGTH.format(arch=self.gguf_writer.arch), head_dim)
+
+    def prepare_metadata(self, vocab_only: bool):
+        super().prepare_metadata(vocab_only=vocab_only)
+        # Override size label to '230x10B' format (total params in 10B × active 10B)
+        total_params = self.gguf_writer.get_total_parameter_count()[0]
+        total_b = int(round(total_params / 1e10) * 10)  # round to nearest 10B
+        size_label = f"{total_b}x10B"
+        self.gguf_writer.add_size_label(size_label)
+
+    # Force GPT-2 style BPE pre-tokenizer for MiniMax M2
+    def get_vocab_base_pre(self, tokenizer) -> str:  # type: ignore[override]
+        return "gpt-2"
+
+    def tensor_force_quant(self, name, new_name, bid, n_dims):
+        del bid, n_dims
+        if name.endswith(""):
+            return False
+        return super().tensor_force_quant(name, new_name, bid, n_dims)
+
+    def _flush_experts(self, bid: int, n_experts: int) -> Iterable[tuple[str, Tensor]]:
+        assert self._experts is not None
+        tensors: list[tuple[str, Tensor]] = []
+        buckets = self._experts[bid]
+
+        def _stack(prefix: str) -> Tensor:
+            parts: list[Tensor] = []
+            for xid in range(n_experts):
+                key = f"model.layers.{bid}.block_sparse_moe.experts.{xid}.{prefix}.weight"
+                parts.append(buckets[key])
+                del buckets[key]
+            # torch dims: [n_expert, rows, cols]
+            return torch.stack(parts, dim=0)
+
+        # Provide torch dims so GGUF/ggml (which reverses dims) ends up with:
+        # gate/up -> [n_embd, n_ff, n_expert], down -> [n_ff, n_embd, n_expert]
+        # w1, w3 in HF are typically [n_ff, n_embd]; w2 is [n_embd, n_ff].
+        gate = _stack("w1")            # [n_expert, n_ff, n_embd]
+        up   = _stack("w3")            # [n_expert, n_ff, n_embd]
+        down = _stack("w2")           # [n_expert, n_embd, n_ff]
+
+        tensors.append((self.format_tensor_name(gguf.MODEL_TENSOR.FFN_GATE_EXP, bid), gate))
+        tensors.append((self.format_tensor_name(gguf.MODEL_TENSOR.FFN_UP_EXP, bid), up))
+        tensors.append((self.format_tensor_name(gguf.MODEL_TENSOR.FFN_DOWN_EXP, bid), down))
+        return tensors
+
+    def modify_tensors(self, data_torch: Tensor, name: str, bid: int | None) -> Iterable[tuple[str, Tensor]]:
+        # Skip FP8 quantization scale tensors - they will be handled separately if needed
+        if "weight_scale_inv" in name:
+            return []
+
+        # MoE experts aggregation
+        if name.find("block_sparse_moe.experts") != -1:
+            assert bid is not None
+            n_experts = self.hparams["num_local_experts"]
+            if self._experts is None:
+                self._experts = [{} for _ in range(self.block_count)]
+            self._experts[bid][name] = data_torch
+            if len(self._experts[bid]) >= n_experts * 3:
+                return self._flush_experts(bid, n_experts)
+            return []
+
+        if name.endswith("e_score_correction_bias"):
+            name = name.replace("e_score_correction_bias", "e_score_correction.bias")
+
+        return [(self.map_tensor_name(name), data_torch)]
+
+    def prepare_tensors(self):
+        super().prepare_tensors()
+
+        if self._experts is not None:
+            leftovers = [k for d in self._experts for k in d.keys()]
+            if leftovers:
+                raise ValueError(f"Unprocessed experts: {leftovers}")
 
 @ModelBase.register("PhiForCausalLM")
 class Phi2Model(TextModel):

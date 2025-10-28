@@ -33,6 +33,7 @@ export interface ApiErrorResponse {
 export interface ApiChatMessageData {
 	role: ChatRole;
 	content: string | ApiChatMessageContentPart[];
+	reasoning_content?: string;
 	timestamp?: number;
 }
 
@@ -153,6 +154,7 @@ export interface ApiChatCompletionRequest {
 	messages: Array<{
 		role: ChatRole;
 		content: string | ApiChatMessageContentPart[];
+		reasoning_content?: string;
 	}>;
 	stream?: boolean;
 	model?: string;

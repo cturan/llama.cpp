@@ -179,7 +179,7 @@ class TensorNameMap:
             "transformer.h.{bid}.mixer.Wqkv",                                      # phi2
             "encoder.layers.{bid}.attn.Wqkv",                                      # nomic-bert
             "encoder.layers.{bid}.mixer.Wqkv",                                     # jina
-            "model.layers.{bid}.self_attn.qkv_proj",                               # phi3
+            "model.layers.{bid}.self_attn.qkv_proj",                               # phi3 minimax-m2
             "model.layers.layers.{bid}.mixer.qkv_proj",                            # plamo2
             "encoder.layers.{bid}.self_attention.query_key_value",                 # chatglm
             "transformer.layers.{bid}.attn.qkv_proj",                              # openelm
@@ -377,6 +377,7 @@ class TensorNameMap:
             "model.layers.{bid}.mlp.moe_statics.e_score_correction",        # ernie4.5-moe
             "model.layers.{bid}.mlp.gate.expert_bias",                      # bailingmoe2
             "model.layers.{bid}.feed_forward.expert_bias",                  # lfm2moe
+            "model.layers.{bid}.block_sparse_moe.e_score_correction.bias",  # minimax-m2
         ),
 
         # Feed-forward up
@@ -553,7 +554,7 @@ class TensorNameMap:
             "model.layers.{bid}.self_attn.q_layernorm",                       # persimmon
             "model.layers.{bid}.self_attn.query_layernorm",                   # hunyuan
             "model.layers.{bid}.attention.query_layernorm",                   # bailingmoe2
-            "model.layers.{bid}.self_attn.q_norm",                            # cohere olmoe chameleon olmo2
+            "model.layers.{bid}.self_attn.q_norm",                            # cohere olmoe chameleon olmo2 minimax-m2
             "layers.{bid}.self_attn.q_norm",                                  # embeddinggemma
             "transformer.blocks.{bid}.attn.q_ln",                             # sea-lion
             "encoder.layer.{bid}.attention.self.layer_norm_q",                # jina-bert-v2
@@ -568,7 +569,7 @@ class TensorNameMap:
             "model.layers.{bid}.self_attn.k_layernorm",                       # persimmon
             "model.layers.{bid}.self_attn.key_layernorm",                     # hunyuan
             "model.layers.{bid}.attention.key_layernorm",                     # bailingmoe2
-            "model.layers.{bid}.self_attn.k_norm",                            # cohere olmoe chameleon olmo2
+            "model.layers.{bid}.self_attn.k_norm",                            # cohere olmoe chameleon olmo2 minimax-m2
             "layers.{bid}.self_attn.k_norm",                                  # embeddinggemma
             "transformer.blocks.{bid}.attn.k_ln",                             # sea-lion
             "encoder.layer.{bid}.attention.self.layer_norm_k",                # jina-bert-v2

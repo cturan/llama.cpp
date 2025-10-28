@@ -152,3 +152,7 @@ poetry.toml
 # IDE
 *.code-workspace
 .windsurf/
+
+
+# Devfiles
+devfiles/
