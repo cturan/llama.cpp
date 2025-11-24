@@ -1,6 +1,7 @@
 #include "chat.h"
 #include "utils.hpp"
 #include "server-http.h"
+#include "inline-tools.h"
 
 #include "arg.h"
 #include "common.h"
@@ -1621,6 +1622,18 @@ struct server_prompt_cache {
     }
 };
 
+// Inline tool FSM states (must be outside struct for proper scoping)
+enum ToolDetectionState {
+    TOOL_STATE_IDLE,
+    TOOL_STATE_SAW_OPEN_1,  // Saw first '['
+    TOOL_STATE_SAW_OPEN_2,  // Saw second '[' (full '[[')
+    TOOL_STATE_IN_COMMAND,  // Reading command name and args
+    TOOL_STATE_SAW_BRACE,   // Saw '{'
+    TOOL_STATE_SAW_EQ_1,    // Saw first '='
+    TOOL_STATE_SAW_EQ_2,    // Saw second '='
+    TOOL_STATE_COMPLETE     // Saw '}' - ready to execute
+};
+
 struct server_slot {
     int id;
 
@@ -1726,6 +1739,17 @@ struct server_slot {
     int32_t n_draft_total = 0;      // Total draft tokens generated
     int32_t n_draft_accepted = 0;   // Draft tokens actually accepted
 
+    // Inline tool FSM state
+    struct ToolState {
+        ToolDetectionState status = TOOL_STATE_IDLE;
+        std::string buffer;
+        int invocation_count = 0;  // Security: track invocations per turn
+        bool inside_inter_think = false;  // Track if we're inside <inter_think> block
+        std::string tag_buffer;  // Buffer for detecting <inter_think> tags
+    } tool_state;
+    
+    std::deque<llama_token> forced_tokens;
+
     void reset() {
         SLT_DBG(*this, "%s", "\n");
 
@@ -1755,6 +1779,13 @@ struct server_slot {
 
         // clear alora start
         alora_invocation_start = -1;
+
+        tool_state.status = TOOL_STATE_IDLE;
+        tool_state.buffer.clear();
+        tool_state.invocation_count = 0;
+        tool_state.inside_inter_think = false;
+        tool_state.tag_buffer.clear();
+        forced_tokens.clear();
     }
 
     bool need_embd() const {
@@ -2363,6 +2394,8 @@ struct server_context {
     common_chat_templates_ptr chat_templates;
     oaicompat_parser_options  oai_parser_opt;
 
+    InlineToolManager inline_tools;
+
     ~server_context() {
         mtmd_free(mctx);
 
@@ -2871,6 +2904,145 @@ struct server_context {
         // remember which tokens were sampled - used for repetition penalties during sampling
         const std::string token_str = result.text_to_send;
         slot.sampled = result.tok;
+
+        // INTER_THINK BLOCK AND TOOL DETECTION
+        // Tools only work inside <inter_think> blocks for full model control
+        if (!slot.forced_tokens.empty()) {
+            // Currently injecting forced tokens - skip detection to avoid interference
+        } else {
+            // Process each character for both tag detection and tool detection
+            for (char c : token_str) {
+                // Track last 20 characters for tag detection
+                slot.tool_state.tag_buffer += c;
+                if (slot.tool_state.tag_buffer.length() > 20) {
+                    slot.tool_state.tag_buffer.erase(0, 1);
+                }
+                
+                // Check for <inter_think> opening tag
+                if (slot.tool_state.tag_buffer.find("<inter_think>") != std::string::npos) {
+                    slot.tool_state.inside_inter_think = true;
+                    SRV_INF("%s\n", "Entered <inter_think> block - tool detection active");
+                }
+                
+                // Check for </inter_think> closing tag
+                if (slot.tool_state.tag_buffer.find("</inter_think>") != std::string::npos) {
+                    slot.tool_state.inside_inter_think = false;
+                    SRV_INF("%s\n", "Exited </inter_think> block - tool detection inactive");
+                }
+                
+                // Tool detection FSM - ONLY active inside <inter_think> blocks
+                if (!slot.tool_state.inside_inter_think) {
+                    // Outside inter_think block - reset tool FSM if needed
+                    if (slot.tool_state.status != TOOL_STATE_IDLE) {
+                        slot.tool_state.status = TOOL_STATE_IDLE;
+                        slot.tool_state.buffer.clear();
+                    }
+                    continue;
+                }
+                
+                // Inside inter_think block - process tool invocations
+                switch (slot.tool_state.status) {
+                    case TOOL_STATE_IDLE:
+                        if (c == '[') {
+                            slot.tool_state.status = TOOL_STATE_SAW_OPEN_1;
+                            slot.tool_state.buffer.clear();
+                        }
+                        break;
+                    
+                    case TOOL_STATE_SAW_OPEN_1:
+                        if (c == '[') {
+                            slot.tool_state.status = TOOL_STATE_SAW_OPEN_2;
+                            // Start accumulating command
+                        } else {
+                            // False alarm, reset
+                            slot.tool_state.status = TOOL_STATE_IDLE;
+                        }
+                        break;
+                    
+                    case TOOL_STATE_SAW_OPEN_2:
+                        if (c == '{') {
+                            slot.tool_state.status = TOOL_STATE_SAW_BRACE;
+                        } else {
+                            // Accumulate command content
+                            slot.tool_state.buffer += c;
+                            slot.tool_state.status = TOOL_STATE_IN_COMMAND;
+                        }
+                        break;
+                    
+                    case TOOL_STATE_IN_COMMAND:
+                        if (c == '{') {
+                            slot.tool_state.status = TOOL_STATE_SAW_BRACE;
+                        } else {
+                            slot.tool_state.buffer += c;
+                        }
+                        break;
+                    
+                    case TOOL_STATE_SAW_BRACE:
+                        if (c == '=') {
+                            slot.tool_state.status = TOOL_STATE_SAW_EQ_1;
+                        } else {
+                            // Not a tool call, add brace to buffer and continue
+                            slot.tool_state.buffer += '{';
+                            slot.tool_state.buffer += c;
+                            slot.tool_state.status = TOOL_STATE_IN_COMMAND;
+                        }
+                        break;
+                    
+                    case TOOL_STATE_SAW_EQ_1:
+                        if (c == '=') {
+                            slot.tool_state.status = TOOL_STATE_SAW_EQ_2;
+                        } else {
+                            // Not a tool call
+                            slot.tool_state.buffer += "{=";
+                            slot.tool_state.buffer += c;
+                            slot.tool_state.status = TOOL_STATE_IN_COMMAND;
+                        }
+                        break;
+                    
+                    case TOOL_STATE_SAW_EQ_2:
+                        if (c == '}') {
+                            slot.tool_state.status = TOOL_STATE_COMPLETE;
+                        } else {
+                            // Not a tool call
+                            slot.tool_state.buffer += "{==";
+                            slot.tool_state.buffer += c;
+                            slot.tool_state.status = TOOL_STATE_IN_COMMAND;
+                        }
+                        break;
+                    
+                    case TOOL_STATE_COMPLETE:
+                        // Should not reach here in normal flow
+                        break;
+                }
+                
+                // Check if we completed a tool invocation
+                if (slot.tool_state.status == TOOL_STATE_COMPLETE) {
+                    // Execute the tool
+                    std::string command = "[[" + slot.tool_state.buffer + "{==}";
+                    SRV_INF("Tool invocation #%d: %s\n", slot.tool_state.invocation_count + 1, command.c_str());
+                    
+                    std::string tool_result = inline_tools.check_and_execute(command);
+                    if (!tool_result.empty()) {
+                        SRV_INF("Tool result: %s\n", tool_result.c_str());
+                        
+                        // Tokenize and inject the result
+                        std::vector<llama_token> tokens = ::common_tokenize(ctx, tool_result, false, true);
+                        for (auto t : tokens) {
+                            slot.forced_tokens.push_back(t);
+                        }
+                        
+                        slot.tool_state.invocation_count++;
+                    } else {
+                        SRV_WRN("%s\n", "Tool execution failed or returned empty result");
+                    }
+                    
+                    // Reset FSM
+                    slot.tool_state.status = TOOL_STATE_IDLE;
+                    slot.tool_state.buffer.clear();
+                    break;
+                }
+            }
+        }
 
         slot.generated_text += token_str;
         if (slot.task->params.return_tokens) {
@@ -4178,7 +4350,17 @@ struct server_context {
 
                 const int tok_idx = slot.i_batch - i;
 
-                llama_token id = common_sampler_sample(slot.smpl, ctx, tok_idx);
+                llama_token id;
+                if (!slot.forced_tokens.empty()) {
+                    id = slot.forced_tokens.front();
+                    slot.forced_tokens.pop_front();
+                    // We need to accept it to update the sampler state? 
+                    // Or just let the context update naturally via llama_decode later?
+                    // common_sampler_accept updates the internal ring buffer of the sampler.
+                    // Yes, we should accept it so repetition penalties etc work correctly.
+                } else {
+                    id = common_sampler_sample(slot.smpl, ctx, tok_idx);
+                }
 
                 slot.i_batch = -1;
 
@@ -4693,6 +4875,49 @@ public:
         // update any props here
 
         res->ok({{ "success", true }});
+        return res;
+    };
+
+    server_http_context::handler_t get_memory = [this](const server_http_req &) {
+        auto res = std::make_unique<server_res_generator>(ctx_server);
+        
+        std::ifstream file("llama_memory.txt");
+        if (!file.is_open()) {
+            res->ok({{"content", ""}, {"size", 0}});
+            return res;
+        }
+        
+        std::stringstream buffer;
+        buffer << file.rdbuf();
+        std::string content = buffer.str();
+        file.close();
+        
+        res->ok({{"content", content}, {"size", content.size()}});
+        return res;
+    };
+
+    server_http_context::handler_t post_memory = [this](const server_http_req & req) {
+        auto res = std::make_unique<server_res_generator>(ctx_server);
+        
+        json data = json::parse(req.body);
+        std::string content = json_value(data, "content", std::string(""));
+        
+        const size_t MAX_SIZE = 5 * 1024; // 5KB limit
+        if (content.size() > MAX_SIZE) {
+            res->error(format_error_response("Memory content exceeds 5KB limit", ERROR_TYPE_INVALID_REQUEST));
+            return res;
+        }
+        
+        std::ofstream file("llama_memory.txt", std::ios::trunc);
+        if (!file.is_open()) {
+            res->error(format_error_response("Failed to write memory file", ERROR_TYPE_SERVER));
+            return res;
+        }
+        
+        file << content;
+        file.close();
+        
+        res->ok({{"success", true}, {"size", content.size()}});
         return res;
     };
 
@@ -5556,6 +5781,8 @@ int main(int argc, char ** argv) {
     ctx_http.get ("/props",               ex_wrapper(routes.get_props));
     ctx_http.post("/props",               ex_wrapper(routes.post_props));
     ctx_http.post("/api/show",            ex_wrapper(routes.get_api_show));
+    ctx_http.get ("/memory",              ex_wrapper(routes.get_memory));
+    ctx_http.post("/memory",              ex_wrapper(routes.post_memory));
     ctx_http.get ("/models",              ex_wrapper(routes.get_models)); // public endpoint (no API key check)
     ctx_http.get ("/v1/models",           ex_wrapper(routes.get_models)); // public endpoint (no API key check)
     ctx_http.get ("/api/tags",            ex_wrapper(routes.get_models)); // ollama specific endpoint. public endpoint (no API key check)

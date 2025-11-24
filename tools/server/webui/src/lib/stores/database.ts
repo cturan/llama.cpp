@@ -176,6 +176,20 @@ export class DatabaseStore {
 	}
 
 	/**
+	 * Deletes ALL conversations and messages (clears entire database).
+	 * 
+	 * @returns Number of deleted conversations
+	 */
+	static async deleteAllConversations(): Promise<number> {
+		return await db.transaction('rw', [db.conversations, db.messages], async () => {
+			const count = await db.conversations.count();
+			await db.conversations.clear();
+			await db.messages.clear();
+			return count;
+		});
+	}
+
+	/**
 	 * Deletes a message and removes it from its parent's children array.
 	 *
 	 * @param messageId - ID of the message to delete

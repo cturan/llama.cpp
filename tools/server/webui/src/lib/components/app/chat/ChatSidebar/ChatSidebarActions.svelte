@@ -1,19 +1,24 @@
 <script lang="ts">
-	import { Search, SquarePen, X } from '@lucide/svelte';
+	import { Search, SquarePen, X, Trash2, Database } from '@lucide/svelte';
 	import { KeyboardShortcutInfo } from '$lib/components/app';
 	import { Button } from '$lib/components/ui/button';
 	import { Input } from '$lib/components/ui/input';
+	import { DatabaseStore } from '$lib/stores/database';
 
 	interface Props {
 		handleMobileSidebarItemClick: () => void;
 		isSearchModeActive: boolean;
 		searchQuery: string;
+		onClearAll?: () => void;
+		onOpenMemory?: () => void;
 	}
 
 	let {
 		handleMobileSidebarItemClick,
 		isSearchModeActive = $bindable(),
-		searchQuery = $bindable()
+		searchQuery = $bindable(),
+		onClearAll,
+		onOpenMemory
 	}: Props = $props();
 
 	let searchInput: HTMLInputElement | null = $state(null);
@@ -76,6 +81,28 @@
 			</div>
 
 			<KeyboardShortcutInfo keys={['cmd', 'k']} />
+		</Button>
+
+		<Button
+			class="w-full justify-start"
+			onclick={onOpenMemory}
+			variant="ghost"
+		>
+			<div class="flex items-center gap-2">
+				<Database class="h-4 w-4" />
+				Memory Manager
+			</div>
+		</Button>
+
+		<Button
+			class="w-full justify-start text-destructive hover:text-destructive"
+			onclick={onClearAll}
+			variant="ghost"
+		>
+			<div class="flex items-center gap-2">
+				<Trash2 class="h-4 w-4" />
+				Clear All Conversations
+			</div>
 		</Button>
 	{/if}
 </div>

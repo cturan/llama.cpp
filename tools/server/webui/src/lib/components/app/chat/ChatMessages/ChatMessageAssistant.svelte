@@ -3,6 +3,7 @@
 	import { useProcessingState } from '$lib/hooks/use-processing-state.svelte';
 	import { isLoading } from '$lib/stores/chat.svelte';
 	import autoResizeTextarea from '$lib/utils/autoresize-textarea';
+	import { parseInterThinkContent, type ContentSegment } from '$lib/utils/inter-think';
 	import { fade } from 'svelte/transition';
 	import {
 		Check,
@@ -91,6 +92,14 @@
 	);
 	const fallbackToolCalls = $derived(typeof toolCallContent === 'string' ? toolCallContent : null);
 
+	// Parse message content into segments (text, thinking, text, thinking...)
+	const contentSegments = $derived(parseInterThinkContent(messageContent || ''));
+	
+	// For DeepSeek-R1 compatibility: if thinkingContent exists, show it as first block
+	const hasDeepSeekThinking = $derived(!!thinkingContent);
+	const hasInterThinkBlocks = $derived(contentSegments.some(s => s.type === 'thinking'));
+	const hasAnyContent = $derived(contentSegments.some(s => s.type === 'text' && s.content.trim()));
+
 	const processingState = useProcessingState();
 	let currentConfig = $derived(config());
 	let serverModel = $derived(serverModelName());
@@ -174,11 +183,12 @@
 	role="group"
 	aria-label="Assistant message with actions"
 >
-	{#if thinkingContent}
+	<!-- DeepSeek-R1 style thinking (legacy support) -->
+	{#if hasDeepSeekThinking}
 		<ChatMessageThinkingBlock
 			reasoningContent={thinkingContent}
 			isStreaming={!message.timestamp}
-			hasRegularContent={!!messageContent?.trim()}
+			hasRegularContent={hasAnyContent}
 		/>
 	{/if}
 
@@ -231,10 +241,25 @@
 			</div>
 		</div>
 	{:else if message.role === 'assistant'}
-		{#if config().disableReasoningFormat}
-			<pre class="raw-output">{messageContent || ''}</pre>
+		{#if contentSegments.length === 0}
+			<!-- Empty message -->
 		{:else}
-			<MarkdownContent content={messageContent || ''} />
+			<!-- Render segments in order: text, thinking, text, thinking... -->
+			{#each contentSegments as segment, index (index)}
+				{#if segment.type === 'thinking'}
+					<ChatMessageThinkingBlock
+						reasoningContent={segment.content}
+						isStreaming={!segment.isClosed}
+						hasRegularContent={contentSegments.some((s, i) => s.type === 'text' && i > index && s.content.trim())}
+					/>
+				{:else if segment.type === 'text'}
+					{#if config().disableReasoningFormat}
+						<pre class="raw-output">{segment.content}</pre>
+					{:else}
+						<MarkdownContent content={segment.content} />
+					{/if}
+				{/if}
+			{/each}
 		{/if}
 	{:else}
 		<div class="text-sm whitespace-pre-wrap">
@@ -347,7 +372,7 @@
 			{onCopy}
 			{onEdit}
 			{onRegenerate}
-			onContinue={currentConfig.enableContinueGeneration && !thinkingContent
+			onContinue={currentConfig.enableContinueGeneration && !hasDeepSeekThinking && !hasInterThinkBlocks
 				? onContinue
 				: undefined}
 			{onDelete}
