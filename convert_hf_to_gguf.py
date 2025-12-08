@@ -1146,6 +1146,9 @@ class TextModel(ModelBase):
         if chkhsh == "f4f37b6c8eb9ea29b3eac6bb8c8487c5ab7885f8d8022e67edc1c68ce8403e95":
             # ref: https://huggingface.co/MiniMaxAI/MiniMax-M2
             res = "minimax-m2"
+        if chkhsh == "514327168efb80a2dbaa6f154dfeda3d9e0a1453b26e3bda45674578c8083410":
+            # ref: custom k2v2 model (Llama-3 based)
+            res = "llama-bpe"
 
         if res is None:
             logger.warning("\n")

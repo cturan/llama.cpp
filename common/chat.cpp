@@ -2070,9 +2070,18 @@ static common_chat_params common_chat_params_init_hermes_2_pro(const common_chat
 
     data.prompt = apply(tmpl, inputs, /* messages_override =*/ std::nullopt, /* tools_override= */ std::nullopt, extra_context);
     data.format = COMMON_CHAT_FORMAT_HERMES_2_PRO;
-    if (string_ends_with(data.prompt, "<think>\n")) {
+    // Support k2v2 model's thinking tags: <think>, <think_fast>, <think_faster>
+    if (string_ends_with(data.prompt, "<think>\n") || 
+        string_ends_with(data.prompt, "<think_fast>\n") || 
+        string_ends_with(data.prompt, "<think_faster>\n")) {
         if (!extra_context["enable_thinking"]) {
-            data.prompt += "</think>";
+            if (string_ends_with(data.prompt, "<think>\n")) {
+                data.prompt += "</think>";
+            } else if (string_ends_with(data.prompt, "<think_fast>\n")) {
+                data.prompt += "</think_fast>";
+            } else {
+                data.prompt += "</think_faster>";
+            }
         } else {
             data.thinking_forced_open = true;
         }

@@ -1133,7 +1133,19 @@ static void common_chat_parse_functionary_v3_1_llama_3_1(common_chat_msg_parser 
 }
 
 static void common_chat_parse_hermes_2_pro(common_chat_msg_parser & builder) {
-    builder.try_parse_reasoning("<think>", "</think>");
+    // Support k2v2 model's thinking tags: <think>, <think_fast>, <think_faster>
+    // Detect which end tag is present and use matching pair
+    std::string start_tag = "<think>";
+    std::string end_tag = "</think>";
+    const auto & input = builder.input();
+    if (input.find("</think_fast>") != std::string::npos) {
+        start_tag = "<think_fast>";
+        end_tag = "</think_fast>";
+    } else if (input.find("</think_faster>") != std::string::npos) {
+        start_tag = "<think_faster>";
+        end_tag = "</think_faster>";
+    }
+    builder.try_parse_reasoning(start_tag, end_tag);
     if (!builder.syntax().parse_tool_calls) {
         builder.add_content(builder.consume_rest());
         return;
