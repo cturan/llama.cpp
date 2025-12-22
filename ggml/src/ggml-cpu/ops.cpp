@@ -4359,6 +4359,7 @@ static void ggml_compute_forward_scale_f32(
     }
 }
 
+
 void ggml_compute_forward_scale(
         const ggml_compute_params * params,
         ggml_tensor * dst) {
@@ -9798,6 +9799,176 @@ void ggml_compute_forward_gla(
                 GGML_ABORT("fatal error");
             }
     }
+}
+
+// ggml_compute_forward_gated_delta_rule
+
+static inline float ggml_compute_sigmoid_f32(float x) {
+    // numerically stable sigmoid
+    if (x >= 0.0f) {
+        const float z = expf(-x);
+        return 1.0f / (1.0f + z);
+    } else {
+        const float z = expf(x);
+        return z / (1.0f + z);
+    }
+}
+
+static void ggml_compute_forward_gated_delta_rule_f32(
+        const ggml_compute_params * params,
+        ggml_tensor * dst) {
+    const ggml_tensor * q    = dst->src[0]; // {D, H, T, B}
+    const ggml_tensor * k    = dst->src[1]; // {D, H, T, B}
+    const ggml_tensor * v    = dst->src[2]; // {D, H, T, B}
+    const ggml_tensor * g    = dst->src[3]; // {H, T, B}
+    const ggml_tensor * beta = dst->src[4]; // {H, T, B}
+    const ggml_tensor * s    = dst->src[5]; // {D, D, H, B}
+
+    const int64_t D = q->ne[0];
+    const int64_t H = q->ne[1];
+    const int64_t T = q->ne[2];
+    const int64_t B = q->ne[3];
+
+    GGML_ASSERT(k->ne[0] == D && k->ne[1] == H && k->ne[2] == T && k->ne[3] == B);
+    GGML_ASSERT(v->ne[0] == D && v->ne[1] == H && v->ne[2] == T && v->ne[3] == B);
+    GGML_ASSERT(g->ne[0] == H && g->ne[1] == T && g->ne[2] == B);
+    GGML_ASSERT(beta->ne[0] == H && beta->ne[1] == T && beta->ne[2] == B);
+    GGML_ASSERT(s->ne[0] == D && s->ne[1] == D && s->ne[2] == H && s->ne[3] == B);
+    GGML_ASSERT(s->type == GGML_TYPE_F32 || s->type == GGML_TYPE_F16);
+    GGML_ASSERT(s->type == GGML_TYPE_F32 || s->type == GGML_TYPE_F16);
+
+    const float q_scale = ggml_get_op_params_f32(dst, 0);
+    const float eps     = ggml_get_op_params_f32(dst, 1);
+
+    const int ith = params->ith;
+    const int nth = params->nth;
+
+    const int64_t n_heads_total = B * H;
+    const int64_t dh = (n_heads_total + nth - 1) / nth;
+    const int64_t ih0 = dh * ith;
+    const int64_t ih1 = MIN(ih0 + dh, n_heads_total);
+
+    float * out = (float *) dst->data;
+    float * out_state = out + ggml_nelements(v);
+
+    const char * q_data    = (const char *) q->data;
+    const char * k_data    = (const char *) k->data;
+    const char * v_data    = (const char *) v->data;
+    const char * g_data    = (const char *) g->data;
+    const char * beta_data = (const char *) beta->data;
+    const void * s_data     = s->data;
+    const bool s_is_f16     = s->type == GGML_TYPE_F16;
+
+    const size_t q_nb1 = q->nb[1];
+    const size_t q_nb2 = q->nb[2];
+    const size_t q_nb3 = q->nb[3];
+    const size_t k_nb1 = k->nb[1];
+    const size_t k_nb2 = k->nb[2];
+    const size_t k_nb3 = k->nb[3];
+    const size_t v_nb1 = v->nb[1];
+    const size_t v_nb2 = v->nb[2];
+    const size_t v_nb3 = v->nb[3];
+    const size_t g_nb0 = g->nb[0];
+    const size_t g_nb1 = g->nb[1];
+    const size_t g_nb2 = g->nb[2];
+    const size_t beta_nb0 = beta->nb[0];
+    const size_t beta_nb1 = beta->nb[1];
+    const size_t beta_nb2 = beta->nb[2];
+
+    std::vector<float> qn(D);
+    std::vector<float> kn(D);
+    std::vector<float> kv_mem(D);
+    std::vector<float> v_new(D);
+
+    for (int64_t bh = ih0; bh < ih1; ++bh) {
+        const int64_t b = bh / H;
+        const int64_t h = bh % H;
+
+        float * state = out_state + (bh * D * D);
+
+        // initialize state from input
+        if (s_is_f16) {
+            const ggml_fp16_t * s_src = (const ggml_fp16_t *) s_data + bh * D * D;
+            for (int64_t row = 0; row < D; ++row) {
+                for (int64_t col = 0; col < D; ++col) {
+                    state[row * D + col] = GGML_FP16_TO_FP32(s_src[row * D + col]);
+                }
+            }
+        } else {
+            const float * s_src = (const float *) s_data + bh * D * D;
+            memcpy(state, s_src, D * D * sizeof(float));
+        }
+
+        for (int64_t t = 0; t < T; ++t) {
+            const int64_t base_qkv = D * (h + H * (t + T * b));
+
+            const float * q_t = (const float *) (q_data + h*q_nb1 + t*q_nb2 + b*q_nb3);
+            const float * k_t = (const float *) (k_data + h*k_nb1 + t*k_nb2 + b*k_nb3);
+            const float * v_t = (const float *) (v_data + h*v_nb1 + t*v_nb2 + b*v_nb3);
+
+            // l2-norm(q), l2-norm(k)
+            float q_ss = 0.0f;
+            float k_ss = 0.0f;
+            for (int64_t d = 0; d < D; ++d) {
+                q_ss += q_t[d] * q_t[d];
+                k_ss += k_t[d] * k_t[d];
+            }
+            const float q_inv = 1.0f / sqrtf(q_ss + eps);
+            const float k_inv = 1.0f / sqrtf(k_ss + eps);
+            for (int64_t d = 0; d < D; ++d) {
+                qn[d] = q_t[d] * q_inv * q_scale;
+                kn[d] = k_t[d] * k_inv;
+            }
+
+            const float g_t    = *(const float *) (g_data + h*g_nb0 + t*g_nb1 + b*g_nb2);
+            const float beta_t = *(const float *) (beta_data + h*beta_nb0 + t*beta_nb1 + b*beta_nb2);
+            const float gexp   = expf(g_t);
+            const float b_sig  = ggml_compute_sigmoid_f32(beta_t);
+
+            // decay state + compute kv_mem = (k^T @ state) (per output dim)
+            std::fill(kv_mem.begin(), kv_mem.end(), 0.0f);
+            for (int64_t row = 0; row < D; ++row) {
+                const float k_row = kn[row];
+                float * state_row = state + row * D;
+                for (int64_t col = 0; col < D; ++col) {
+                    state_row[col] *= gexp;
+                    kv_mem[col] += state_row[col] * k_row;
+                }
+            }
+
+            // v_new = beta * (v - kv_mem)
+            for (int64_t col = 0; col < D; ++col) {
+                v_new[col] = b_sig * (v_t[col] - kv_mem[col]);
+            }
+
+            // state += k ⊗ v_new
+            for (int64_t row = 0; row < D; ++row) {
+                const float k_row = kn[row];
+                float * state_row = state + row * D;
+                for (int64_t col = 0; col < D; ++col) {
+                    state_row[col] += k_row * v_new[col];
+                }
+            }
+
+            // output = q^T @ state
+            float * out_t = out + base_qkv;
+            for (int64_t col = 0; col < D; ++col) {
+                float sum = 0.0f;
+                for (int64_t row = 0; row < D; ++row) {
+                    sum += qn[row] * state[row * D + col];
+                }
+                out_t[col] = sum;
+            }
+        }
+    }
+}
+
+
+void ggml_compute_forward_gated_delta_rule(
+        const ggml_compute_params * params,
+        ggml_tensor * dst) {
+    GGML_ASSERT(dst->src[0]->type == GGML_TYPE_F32);
+    ggml_compute_forward_gated_delta_rule_f32(params, dst);
 }
 
 static void ggml_compute_forward_solve_tri_f32(const struct ggml_compute_params * params, struct ggml_tensor * dst) {

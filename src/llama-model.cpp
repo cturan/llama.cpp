@@ -7128,6 +7128,9 @@ llama_memory_i * llama_model::create_memory(const llama_memory_params & params, 
                         };
                     }
 
+                    ggml_type recurrent_type_k = GGML_TYPE_F32;
+                    ggml_type recurrent_type_v = GGML_TYPE_F32;
+
                     res = new llama_memory_hybrid(
                         /* model             */ *this,
                         /* attn_type_k       */ params.type_k,
@@ -7137,8 +7140,8 @@ llama_memory_i * llama_model::create_memory(const llama_memory_params & params, 
                         /* attn_n_pad        */ 1,
                         /* attn_n_swa        */ hparams.n_swa,
                         /* attn_swa_type     */ hparams.swa_type,
-                        /* recurrent_type_k  */ GGML_TYPE_F32,
-                        /* recurrent_type_v  */ GGML_TYPE_F32,
+                        /* recurrent_type_k  */ recurrent_type_k,
+                        /* recurrent_type_v  */ recurrent_type_v,
                         /* recurrent_kv_size */ std::max((uint32_t) 1, cparams.n_seq_max),
                         /* n_seq_max         */ cparams.n_seq_max,
                         /* offload           */ cparams.offload_kqv,

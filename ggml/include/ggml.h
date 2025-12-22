@@ -549,6 +549,7 @@ extern "C" {
         GGML_OP_ADD_REL_POS,
         GGML_OP_RWKV_WKV6,
         GGML_OP_GATED_LINEAR_ATTN,
+        GGML_OP_GATED_DELTA_RULE,
         GGML_OP_RWKV_WKV7,
         GGML_OP_SOLVE_TRI,
 
@@ -2428,6 +2429,18 @@ extern "C" {
             struct ggml_tensor  * g,
             struct ggml_tensor  * state,
             float scale);
+
+    // Gated Delta Rule (GDN) - concatenated output + updated state
+    GGML_API struct ggml_tensor * ggml_gated_delta_rule(
+            struct ggml_context * ctx,
+            struct ggml_tensor  * q,
+            struct ggml_tensor  * k,
+            struct ggml_tensor  * v,
+            struct ggml_tensor  * g,
+            struct ggml_tensor  * beta,
+            struct ggml_tensor  * state,
+            float                 scale,
+            float                 eps);
 
     GGML_API struct ggml_tensor * ggml_rwkv_wkv7(
             struct ggml_context * ctx,

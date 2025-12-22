@@ -3516,6 +3516,55 @@ struct test_gla : public test_case {
     }
 };
 
+// GGML_OP_GATED_DELTA_RULE
+struct test_gated_delta_rule : public test_case {
+    const ggml_type type;
+
+    const int64_t head_count;
+    const int64_t head_dim;
+    const int64_t n_seq_tokens;
+    const int64_t n_seqs;
+    const float eps;
+
+    ggml_tensor * t_g = nullptr;
+    ggml_tensor * t_state = nullptr;
+
+    std::string vars() override {
+        return VARS_TO_STR5(type, head_count, head_dim, n_seq_tokens, n_seqs);
+    }
+
+    test_gated_delta_rule(ggml_type type = GGML_TYPE_F32,
+            int64_t head_count = 8, int64_t head_dim = 64, int64_t n_seq_tokens = 32, int64_t n_seqs = 4, float eps = 1e-6f)
+        : type(type), head_count(head_count), head_dim(head_dim), n_seq_tokens(n_seq_tokens), n_seqs(n_seqs), eps(eps) {}
+
+    ggml_tensor * build_graph(ggml_context * ctx) override {
+        ggml_tensor * q = ggml_new_tensor(ctx, type, 4, std::vector<int64_t>{ head_dim, head_count, n_seq_tokens, n_seqs }.data());
+        ggml_tensor * k = ggml_new_tensor(ctx, type, 4, std::vector<int64_t>{ head_dim, head_count, n_seq_tokens, n_seqs }.data());
+        ggml_tensor * v = ggml_new_tensor(ctx, type, 4, std::vector<int64_t>{ head_dim, head_count, n_seq_tokens, n_seqs }.data());
+        t_g = ggml_new_tensor(ctx, type, 3, std::vector<int64_t>{ head_count, n_seq_tokens, n_seqs }.data());
+        ggml_tensor * beta = ggml_new_tensor(ctx, type, 3, std::vector<int64_t>{ head_count, n_seq_tokens, n_seqs }.data());
+        t_state = ggml_new_tensor(ctx, type, 4, std::vector<int64_t>{ head_dim, head_dim, head_count, n_seqs }.data());
+
+        ggml_tensor * out = ggml_gated_delta_rule(ctx, q, k, v, t_g, beta, t_state, powf((float) head_dim, -0.5f), eps);
+        return out;
+    }
+
+    void initialize_tensors(ggml_context * ctx) override {
+        for (ggml_tensor * t = ggml_get_first_tensor(ctx); t != nullptr; t = ggml_get_next_tensor(ctx, t)) {
+            if (t == t_g) {
+                // keep exp(g) bounded over long sequences
+                init_tensor_uniform(t, -0.2f, 0.0f);
+                continue;
+            }
+            if (t == t_state) {
+                init_tensor_uniform(t, -0.1f, 0.1f);
+                continue;
+            }
+            init_tensor_uniform(t);
+        }
+    }
+};
+
 // GGML_OP_RWKV_WKV7
 struct test_rwkv_wkv7 : public test_case {
     const ggml_type type;
@@ -7321,6 +7370,11 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
     test_cases.emplace_back(new test_gla(GGML_TYPE_F32, 32, 64, 32, 1));
     test_cases.emplace_back(new test_gla(GGML_TYPE_F32, 32, 64, 32, 4));
     test_cases.emplace_back(new test_gla(GGML_TYPE_F32, 32, 64, 128, 4));
+
+    test_cases.emplace_back(new test_gated_delta_rule(GGML_TYPE_F32, 8, 64, 1, 1));
+    test_cases.emplace_back(new test_gated_delta_rule(GGML_TYPE_F32, 8, 64, 32, 1));
+    test_cases.emplace_back(new test_gated_delta_rule(GGML_TYPE_F32, 8, 64, 32, 4));
+    test_cases.emplace_back(new test_gated_delta_rule(GGML_TYPE_F32, 4, 128, 16, 2));
 
 #if 0
     // > 4GB A matrix. Too slow to be enabled by default.

@@ -51,6 +51,7 @@
 #include "ggml-cuda/upscale.cuh"
 #include "ggml-cuda/wkv.cuh"
 #include "ggml-cuda/gla.cuh"
+#include "ggml-cuda/gated-delta-rule.cuh"
 #include "ggml-cuda/set.cuh"
 #include "ggml-cuda/set-rows.cuh"
 #include "ggml-cuda/pad_reflect_1d.cuh"
@@ -2720,6 +2721,9 @@ static bool ggml_cuda_compute_forward(ggml_backend_cuda_context & ctx, struct gg
         case GGML_OP_GATED_LINEAR_ATTN:
             ggml_cuda_op_gated_linear_attn(ctx, dst);
             break;
+        case GGML_OP_GATED_DELTA_RULE:
+            ggml_cuda_op_gated_delta_rule(ctx, dst);
+            break;
         case GGML_OP_RWKV_WKV7:
             ggml_cuda_op_rwkv_wkv7(ctx, dst);
             break;
@@ -3194,8 +3198,9 @@ static bool ggml_cuda_can_fuse(const struct ggml_cgraph * cgraph, int node_idx, 
         const ggml_tensor *tanh   = cgraph->nodes[node_idx+1];
         const ggml_tensor *scale2 = cgraph->nodes[node_idx+2];
 
-        GGML_ASSERT(scale->src[0]->type == GGML_TYPE_F32);
-        GGML_ASSERT(scale->type == GGML_TYPE_F32);
+        if (scale->src[0]->type != GGML_TYPE_F32 || scale->type != GGML_TYPE_F32) {
+            return false;
+        }
 
         if (ggml_get_unary_op(tanh) != GGML_UNARY_OP_TANH) {
             return false;
@@ -4611,6 +4616,44 @@ static bool ggml_backend_cuda_device_supports_op(ggml_backend_dev_t dev, const g
         case GGML_OP_GROUP_NORM:
         case GGML_OP_PAD:
             return ggml_is_contiguous(op->src[0]);
+        case GGML_OP_GATED_DELTA_RULE: {
+            const ggml_tensor * q = op->src[0];
+            const ggml_tensor * k = op->src[1];
+            const ggml_tensor * v = op->src[2];
+            const ggml_tensor * g = op->src[3];
+            const ggml_tensor * beta = op->src[4];
+            const ggml_tensor * s = op->src[5];
+            const int64_t D = q->ne[0];
+            const ggml_type qtype = q->type;
+            const bool type_ok = (qtype == GGML_TYPE_F32 || qtype == GGML_TYPE_F16) &&
+                                 k->type == qtype &&
+                                 v->type == qtype &&
+                                 g->type == qtype &&
+                                 beta->type == qtype &&
+                                 (s->type == GGML_TYPE_F32 || s->type == GGML_TYPE_F16);
+            const size_t tsize = ggml_type_size(qtype);
+            const size_t ssize = ggml_type_size(s->type);
+            const bool stride_ok =
+                q->nb[0] == tsize && k->nb[0] == tsize && v->nb[0] == tsize &&
+                g->nb[0] == tsize && beta->nb[0] == tsize &&
+                q->nb[1] % tsize == 0 && q->nb[2] % tsize == 0 && q->nb[3] % tsize == 0 &&
+                k->nb[1] % tsize == 0 && k->nb[2] % tsize == 0 && k->nb[3] % tsize == 0 &&
+                v->nb[1] % tsize == 0 && v->nb[2] % tsize == 0 && v->nb[3] % tsize == 0 &&
+                g->nb[1] % tsize == 0 && g->nb[2] % tsize == 0 &&
+                beta->nb[1] % tsize == 0 && beta->nb[2] % tsize == 0 &&
+                s->nb[0] == ssize;
+            return type_ok &&
+                   stride_ok &&
+                   ggml_is_contiguous(s) &&
+                   ggml_are_same_shape(op->src[0], op->src[1]) &&
+                   ggml_are_same_shape(op->src[0], op->src[2]) &&
+                   ggml_is_3d(op->src[3]) &&
+                   ggml_is_3d(op->src[4]) &&
+                   op->src[3]->ne[0] == q->ne[1] && op->src[3]->ne[1] == q->ne[2] && op->src[3]->ne[2] == q->ne[3] &&
+                   op->src[4]->ne[0] == q->ne[1] && op->src[4]->ne[1] == q->ne[2] && op->src[4]->ne[2] == q->ne[3] &&
+                   s->ne[0] == D && s->ne[1] == D && s->ne[2] == q->ne[1] && s->ne[3] == q->ne[3] &&
+                   (D == 64 || D == 128);
+        }
         case GGML_OP_UPSCALE:
         case GGML_OP_PAD_REFLECT_1D:
         case GGML_OP_ARANGE:

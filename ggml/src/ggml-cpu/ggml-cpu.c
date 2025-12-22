@@ -2010,6 +2010,10 @@ static void ggml_compute_forward(struct ggml_compute_params * params, struct ggm
             {
                 ggml_compute_forward_gla(params, tensor);
             } break;
+        case GGML_OP_GATED_DELTA_RULE:
+            {
+                ggml_compute_forward_gated_delta_rule(params, tensor);
+            } break;
         case GGML_OP_RWKV_WKV7:
             {
                 ggml_compute_forward_rwkv_wkv7(params, tensor);
